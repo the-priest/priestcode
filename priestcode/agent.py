@@ -50,6 +50,11 @@ class Agent:
         self.instructions = instructions
         self.snapshots = _snap.SnapshotStack()
         self._mcp_tools: Dict[str, Tool] = {}
+        # Native (OpenCode-style) function-calling is the primary path: a real
+        # `tools` schema goes out, structured tool_calls come back. Flips off for
+        # the session if a provider rejects the tools field (then the text
+        # protocol fallback carries the turn).
+        self.native = True
         # the tool set is the agent/mode's (plan mode is read-only), plus any
         # explicit override, plus MCP tools merged in by the caller.
         self.tools = tools or self.agent_def.toolset()
@@ -122,14 +127,40 @@ class Agent:
                 emit(E.Notice(comp.error, "error"))
                 emit(E.Done(steps, "error"))
                 return
+            if comp.tools_unsupported:
+                self.native = False     # this provider ignores tools
             self.cost_tokens += comp.completion_tokens
             emit(E.Usage(comp.prompt_tokens, comp.completion_tokens,
                          comp.seconds, self.model.label))
 
+            # ── NATIVE PATH: structured tool_calls (the OpenCode contract) ──
+            if comp.tool_calls:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": comp.text or None,
+                    "tool_calls": [
+                        {"id": c["id"], "type": "function",
+                         "function": {"name": c["name"],
+                                      "arguments": c["arguments"]}}
+                        for c in comp.tool_calls]})
+                emit(E.TurnFinished(steps, had_tool_calls=True,
+                                    truncated=comp.truncated))
+                empty_retries = 0
+                for c in comp.tool_calls:
+                    if self._stop:
+                        emit(E.Done(steps, "stopped"))
+                        return
+                    call = _structured_to_call(c)
+                    ok, output = self._dispatch(call, ctx, emit)
+                    # round-trip as a role:"tool" message with the call id
+                    self.messages.append({"role": "tool",
+                                          "tool_call_id": c["id"],
+                                          "content": output})
+                continue
+
+            # ── FALLBACK PATH: the text <tool> protocol ──
             calls = harness.parse_tool_calls(comp.text)
             clean = harness.clean_reply(comp.text)
-
-            # record the assistant turn (canonical form, so history is clean)
             self.messages.append(
                 {"role": "assistant",
                  "content": harness.canonicalise(comp.text) or clean})
@@ -156,14 +187,16 @@ class Agent:
             emit(E.TurnFinished(steps, had_tool_calls=True,
                                 truncated=comp.truncated))
             empty_retries = 0
-            # run every call, collect results, feed them back as ONE user msg
             result_blocks: List[str] = []
             for call in calls:
                 if self._stop:
                     emit(E.Done(steps, "stopped"))
                     return
-                block = self._dispatch(call, ctx, emit)
-                result_blocks.append(block)
+                ok, output = self._dispatch(call, ctx, emit)
+                status = "ok" if ok else "error"
+                result_blocks.append(
+                    f'<tool_result name="{call.name}" status="{status}">\n'
+                    f'{output}\n</tool_result>')
             self.messages.append(
                 {"role": "user", "content": "\n".join(result_blocks)})
         emit(E.Notice(f"hit the {self.config.max_steps}-step ceiling", "warn"))
@@ -177,37 +210,35 @@ class Agent:
         def on_reasoning(t: str):
             emit(E.Thinking(t))
 
+        from .tools import tools_schema
+        schema = tools_schema(self.tools) if self.native else None
         return self.client.stream(
             self.model, self.messages, on_token, on_reasoning,
             temperature=self.config.temperature, top_p=self.config.top_p,
-            max_tokens=self.config.max_tokens,
+            max_tokens=self.config.max_tokens, tools=schema,
             cancel=lambda: self._stop)
 
-    # ── run one tool call, return the <tool_result> block for history ─
-    def _dispatch(self, call, ctx: ToolContext, emit: Emit) -> str:
+    # ── run one tool call; emit events; return (ok, model-facing output) ──
+    def _dispatch(self, call, ctx: ToolContext, emit: Emit):
         cid = f"c{int(time.time() * 1000) % 100000}"
         tool = self.tools.get(call.name)
         if tool is None:
             emit(E.ToolStarted(cid, call.name, call.args, f"unknown: {call.name}"))
-            emit(E.ToolFinished(cid, call.name, False,
-                                summary="unknown tool"))
-            return (f'<tool_result name="{call.name}">\nunknown tool '
-                    f'{call.name!r}. Available: {", ".join(self.tools)}.\n'
-                    f'</tool_result>')
+            emit(E.ToolFinished(cid, call.name, False, summary="unknown tool"))
+            return (False, f"unknown tool {call.name!r}. "
+                    f"Available: {', '.join(self.tools)}.")
         if call.raw:
             emit(E.ToolStarted(cid, call.name, {}, "unparseable arguments"))
             emit(E.ToolFinished(cid, call.name, False, summary="bad JSON"))
-            return (f'<tool_result name="{call.name}">\nthe arguments were not '
-                    f'valid JSON. Re-send this call with a valid JSON body.\n'
-                    f'</tool_result>')
+            return (False, "the arguments were not valid JSON. Re-send this "
+                    "call with a valid JSON body.")
 
         emit(E.ToolStarted(cid, call.name, call.args, tool.summarize(call.args)))
         try:
             res = tool.run(call.args, ctx)
         except Exception as e:  # a tool must never take the loop down
             emit(E.ToolFinished(cid, call.name, False, summary=f"crashed: {e}"))
-            return (f'<tool_result name="{call.name}">\ntool crashed: {e}\n'
-                    f'</tool_result>')
+            return (False, f"tool crashed: {e}")
 
         # snapshot the pre-change state so /undo can revert it
         if res.ok and call.name in ("write_file", "edit_file") and res.detail.get("path"):
@@ -226,6 +257,19 @@ class Agent:
             emit(E.TodoUpdated(self.todos))
         emit(E.ToolFinished(cid, call.name, res.ok, res.summary, res.output,
                             res.detail))
-        status = "ok" if res.ok else "error"
-        return (f'<tool_result name="{call.name}" status="{status}">\n'
-                f'{res.output}\n</tool_result>')
+        return (res.ok, res.output)
+
+
+def _structured_to_call(c: Dict) -> "harness.ToolCall":
+    """Turn a native {id,name,arguments} tool call into a harness.ToolCall,
+    marking it raw if the JSON arguments do not parse."""
+    import json as _json
+    name = c.get("name", "")
+    raw_args = c.get("arguments") or "{}"
+    try:
+        args = _json.loads(raw_args) if raw_args.strip() else {}
+        if not isinstance(args, dict):
+            args = {"value": args}
+        return harness.ToolCall(name=name, args=args, raw=False)
+    except Exception:
+        return harness.ToolCall(name=name, args={"_raw": raw_args}, raw=True)

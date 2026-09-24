@@ -24,7 +24,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from . import harness
@@ -40,6 +40,11 @@ class Completion:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     seconds: float = 0.0
+    # Native (OpenCode-style) structured tool calls: each is
+    # {"id": str, "name": str, "arguments": str-json}. Populated when the
+    # request carried a `tools` schema and the model replied with tool_calls.
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    tools_unsupported: bool = False   # provider rejected the tools field
 
 
 def _render_tool_calls(acc: Dict[int, Dict[str, str]]) -> str:
@@ -97,9 +102,19 @@ class Client:
                *, temperature: float = 0.3, top_p: float = 0.95,
                max_tokens: int = 16384,
                reasoning_effort: str = "low",
+               tools: Optional[List[Dict[str, Any]]] = None,
                cancel: Optional[Callable[[], bool]] = None) -> Completion:
-        """Stream one completion. Content tokens AND synthesized tool calls both
-        arrive through `on_token`; reasoning (if any) through `on_reasoning`."""
+        """Stream one completion.
+
+        NATIVE function-calling (the OpenCode way): when `tools` (a list of
+        OpenAI function schemas) is passed, it goes in the request and the
+        model's structured `tool_calls` come back in `Completion.tool_calls`,
+        each `{id, name, arguments}` — the caller round-trips them as
+        `role:"tool"` messages. Content still streams through `on_token`,
+        reasoning through `on_reasoning`. If the provider rejects the `tools`
+        field, `Completion.tools_unsupported` is set so the caller can fall back
+        to the text protocol.
+        """
         body: Dict[str, Any] = {
             "model": model.id,
             "messages": messages,
@@ -108,14 +123,21 @@ class Client:
             "max_tokens": max_tokens,
             "stream": True,
         }
+        # DeepSeek REQUIRES thinking off to use the function-call feature — and
+        # off is the right default for tool use across the family anyway.
         if model.thinking_off:
-            body["enable_thinking"] = False        # DeepSeek: off for tool use
+            body["enable_thinking"] = False
         if model.reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
 
-        return self._attempt(body, on_token, on_reasoning, cancel)
+        return self._attempt(body, on_token, on_reasoning, cancel,
+                             native=bool(tools))
 
-    def _attempt(self, body, on_token, on_reasoning, cancel) -> Completion:
+    def _attempt(self, body, on_token, on_reasoning, cancel,
+                 native=False) -> Completion:
         url = self.base_url + "/chat/completions"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=self._headers(),
@@ -153,7 +175,7 @@ class Client:
                     if tok:
                         parts.append(tok)
                         on_token(tok)
-                    # structured tool calls
+                    # structured tool calls (accumulated by index, id captured)
                     for tc in (delta.get("tool_calls") or []):
                         fn = tc.get("function") or {}
                         idx = tc.get("index")
@@ -162,7 +184,9 @@ class Client:
                         if fn.get("name") and idx in tc_acc and tc_acc[idx].get("name"):
                             # a new call under a reused index → new slot
                             idx = max(tc_acc) + 1 if tc_acc else 0
-                        slot = tc_acc.setdefault(idx, {"name": "", "args": ""})
+                        slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
                         if fn.get("name"):
                             slot["name"] = fn["name"]
                         if fn.get("arguments"):
@@ -178,6 +202,18 @@ class Client:
                 detail = e.read().decode("utf-8", "replace")[:400]
             except Exception:
                 pass
+            # A provider that does not support the `tools` field: strip it and
+            # retry once on the text protocol rather than failing the turn.
+            low = (detail or "").lower()
+            if (e.code in (400, 422) and native and body.get("tools")
+                    and any(w in low for w in
+                            ("tool", "function", "tool_choice"))):
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
+                comp = self._attempt(body, on_token, on_reasoning, cancel,
+                                     native=False)
+                comp.tools_unsupported = True
+                return comp
             comp.error = self._explain_http(e.code, detail)
             return comp
         except urllib.error.URLError as e:
@@ -187,16 +223,28 @@ class Client:
             comp.error = f"{type(e).__name__}: {e}"
             return comp
 
-        # THE token-channel fix: a structured call with empty content must reach
-        # the token buffer, not only the returned text — so emit the synthesized
-        # call through on_token when the model produced no textual call itself.
-        if tc_acc:
-            synth = _render_tool_calls(tc_acc)
-            if synth and not harness.parse_tool_calls("".join(parts)):
-                on_token(synth)
-                parts.append(synth)
-
         comp.text = "".join(parts)
+        if native:
+            # NATIVE PATH: hand the structured calls back as-is. The agent will
+            # round-trip them as an assistant.tool_calls message + role:"tool"
+            # results — the OpenCode contract. No text synthesis.
+            for i in sorted(tc_acc):
+                slot = tc_acc[i]
+                name = (slot.get("name") or "").strip()
+                if not name:
+                    continue
+                comp.tool_calls.append({
+                    "id": slot.get("id") or f"call_{i}",
+                    "name": name,
+                    "arguments": slot.get("args") or "{}"})
+        elif tc_acc:
+            # FALLBACK (text protocol): a provider that ignored `tools` but still
+            # streamed structured calls — fold them into canonical <tool> text so
+            # the text parser sees them (the harness path).
+            synth = _render_tool_calls(tc_acc)
+            if synth and not harness.parse_tool_calls(comp.text):
+                on_token(synth)
+                comp.text += synth
         comp.finish_reason = finish
         comp.truncated = finish == "length"
         comp.seconds = time.time() - started

@@ -90,13 +90,39 @@ def _rel(ctx: ToolContext, p: Path) -> str:
 # ── the Tool base ────────────────────────────────────────────────────
 class Tool:
     name = ""
-    description = ""      # includes an example: <tool name="x">{...}</tool> // desc
+    description = ""      # text-protocol contract line (kept as a fallback)
+    # NATIVE function-calling (OpenCode style): a typed JSON-schema for the
+    # arguments. `summary` is the one-line description the model sees in the
+    # tools array; `params`/`required` are the parameter schema.
+    summary = ""
+    params: Dict[str, Any] = {}
+    required = ()
 
     def run(self, args: Dict[str, Any], ctx: ToolContext) -> ToolResult:
         raise NotImplementedError
 
     def summarize(self, args: Dict[str, Any]) -> str:
         return self.name
+
+    def schema(self) -> Dict[str, Any]:
+        """The OpenAI function-tool schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.summary or self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": dict(self.params),
+                    "required": list(self.required),
+                },
+            },
+        }
+
+
+def tools_schema(tools: Dict[str, "Tool"]) -> List[Dict[str, Any]]:
+    """The full `tools` array sent to the provider for native function-calling."""
+    return [t.schema() for t in tools.values()]
 
 
 def _need(args, *keys) -> Optional[str]:
@@ -111,6 +137,13 @@ class ReadFile(Tool):
     name = "read_file"
     description = ('read a file. <tool name="read_file">{"path": "src/app.py"}'
                   '</tool>  // optional "offset" and "limit" (line numbers)')
+    summary = "Read a text file from the workspace, with optional line range."
+    params = {
+        "path": {"type": "string", "description": "file path, relative to the repo"},
+        "offset": {"type": "integer", "description": "first line to read (0-based)"},
+        "limit": {"type": "integer", "description": "number of lines to read"},
+    }
+    required = ("path",)
 
     def summarize(self, args):
         return f'read {args.get("path", "?")}'
@@ -146,6 +179,15 @@ class WriteFile(Tool):
                   '<tool name="write_file">{"path": "index.html", "content": '
                   '"<!DOCTYPE html>..."}</tool>  // "mode":"create" (default) '
                   'or "append"')
+    summary = ("Create or overwrite a file with the given content (parent dirs "
+               "are created). Use mode 'append' to add to the end.")
+    params = {
+        "path": {"type": "string", "description": "file path, relative to the repo"},
+        "content": {"type": "string", "description": "the full file content"},
+        "mode": {"type": "string", "enum": ["create", "append"],
+                 "description": "create/overwrite (default) or append"},
+    }
+    required = ("path", "content")
 
     def summarize(self, args):
         return f'write {args.get("path", "?")}'
@@ -194,6 +236,15 @@ class EditFile(Tool):
     description = ('replace an exact string in a file (must match once unless '
                   '"all":true). <tool name="edit_file">{"path": "app.py", '
                   '"old": "def foo():", "new": "def foo(x):"}</tool>')
+    summary = ("Replace an exact substring in a file. 'old' must match once "
+               "(include surrounding context) unless 'all' is true.")
+    params = {
+        "path": {"type": "string", "description": "file path, relative to the repo"},
+        "old": {"type": "string", "description": "exact text to replace"},
+        "new": {"type": "string", "description": "replacement text"},
+        "all": {"type": "boolean", "description": "replace every occurrence"},
+    }
+    required = ("path", "old", "new")
 
     def summarize(self, args):
         return f'edit {args.get("path", "?")}'
@@ -241,6 +292,9 @@ class EditFile(Tool):
 class ListDir(Tool):
     name = "list_dir"
     description = ('list a directory. <tool name="list_dir">{"path": "."}</tool>')
+    summary = "List the files and folders in a directory."
+    params = {"path": {"type": "string", "description": "directory (default '.')"}}
+    required = ()
 
     def summarize(self, args):
         return f'list {args.get("path", ".")}'
@@ -263,6 +317,12 @@ class Tree(Tool):
     name = "tree"
     description = ('a compact recursive file tree. <tool name="tree">{"path": '
                   '".", "depth": 3}</tool>')
+    summary = "Show a compact recursive file tree of the repo."
+    params = {
+        "path": {"type": "string", "description": "root (default '.')"},
+        "depth": {"type": "integer", "description": "max depth (default 3)"},
+    }
+    required = ()
     _SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist",
              "build", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
 
@@ -300,6 +360,9 @@ class Glob(Tool):
     name = "glob"
     description = ('find files by glob. <tool name="glob">{"pattern": '
                   '"**/*.py"}</tool>')
+    summary = "Find files matching a glob pattern (e.g. '**/*.py')."
+    params = {"pattern": {"type": "string", "description": "glob, e.g. **/*.py"}}
+    required = ("pattern",)
 
     def summarize(self, args):
         return f'glob {args.get("pattern", "?")}'
@@ -330,6 +393,12 @@ class Grep(Tool):
     name = "grep"
     description = ('search file contents with a regex. <tool name="grep">'
                   '{"pattern": "def \\\\w+", "glob": "**/*.py"}</tool>')
+    summary = "Search file contents with a regular expression."
+    params = {
+        "pattern": {"type": "string", "description": "a Python regex"},
+        "glob": {"type": "string", "description": "limit to files matching this glob"},
+    }
+    required = ("pattern",)
 
     def summarize(self, args):
         return f'grep {args.get("pattern", "?")!r}'
@@ -373,6 +442,13 @@ class Run(Tool):
                   '{"command": "python -m pytest -q"}</tool>  // asks before '
                   'running unless approval is off; catastrophic commands are '
                   'always refused')
+    summary = ("Run a shell command in the workspace (asks first unless approval "
+               "is off; catastrophic commands are always refused).")
+    params = {
+        "command": {"type": "string", "description": "the shell command"},
+        "timeout": {"type": "integer", "description": "seconds (default 120)"},
+    }
+    required = ("command",)
 
     def summarize(self, args):
         return f'run: {args.get("command", "?")}'
@@ -420,6 +496,23 @@ class TodoWrite(Tool):
                   '{"items": [{"text": "write parser", "status": "doing"}, '
                   '{"text": "add tests", "status": "todo"}]}</tool>  // status: '
                   'todo | doing | done')
+    summary = "Set the visible task list (text + status: todo/doing/done)."
+    params = {
+        "items": {
+            "type": "array",
+            "description": "the task list",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "status": {"type": "string",
+                               "enum": ["todo", "doing", "done"]},
+                },
+                "required": ["text"],
+            },
+        },
+    }
+    required = ("items",)
 
     def summarize(self, args):
         return f'{len(args.get("items", []))} tasks'
