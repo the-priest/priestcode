@@ -64,6 +64,18 @@ class MCPServer:
         try:
             if self.proc:
                 self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+                for s in (self.proc.stdin, self.proc.stdout):
+                    try:
+                        s and s.close()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -88,7 +100,18 @@ class MCPServer:
             assert self.proc and self.proc.stdout
             # read lines until we see the matching id (skip notifications)
             deadline = threading.Event()
-            timer = threading.Timer(timeout, deadline.set)
+
+            def _expire():
+                # Setting the event is not enough: readline() is blocked and only
+                # checked BETWEEN lines, so a server that accepts the request and
+                # then goes silent would hang this (agent worker) thread forever.
+                # Kill the child so its stdout closes and readline() returns ''.
+                deadline.set()
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            timer = threading.Timer(timeout, _expire)
             timer.start()
             try:
                 while not deadline.is_set():
@@ -165,6 +188,8 @@ def load_servers(config: Dict[str, Any],
             if notice:
                 notice(f"mcp: {name} failed to start ({e})")
             continue
+        import atexit
+        atexit.register(srv.stop)   # nothing else stops the child otherwise
         for tspec in srv.tools:
             t = MCPTool(srv, tspec)
             tools[t.name] = t

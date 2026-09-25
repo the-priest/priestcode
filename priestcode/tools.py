@@ -64,6 +64,19 @@ class ToolContext:
             return None if self.approve(action, prompt, detail) else "declined"
         return None
 
+    def gate_read(self, resource: str) -> Optional[str]:
+        """Gate a READ. Reads are not gated by the approval MODE (that would
+        prompt on every file read) — only by an EXPLICIT permission rule. A
+        `deny` rule on a path must actually stop the read; an `ask` rule prompts;
+        anything else (including no ruleset) proceeds silently."""
+        eff = self.permissions.evaluate("read", resource) if self.permissions else None
+        if eff == "deny":
+            return f"blocked by permission policy (read {resource})"
+        if eff == "ask":
+            return (None if self.approve("read", f"Read {resource}?", resource)
+                    else "declined")
+        return None
+
 
 # ── path safety ──────────────────────────────────────────────────────
 def _resolve(ctx: ToolContext, path: str) -> Path:
@@ -157,6 +170,9 @@ class ReadFile(Tool):
             return ToolResult(False, output="path is outside the workspace")
         if not p.is_file():
             return ToolResult(False, output=f"no such file: {_rel(ctx, p)}")
+        blocked = ctx.gate_read(_rel(ctx, p))
+        if blocked:
+            return ToolResult(False, summary=blocked, output=f"not read ({blocked}).")
         try:
             text = p.read_text("utf-8", errors="replace")
         except Exception as e:
@@ -303,6 +319,9 @@ class ListDir(Tool):
         p = _resolve(ctx, args.get("path", "."))
         if not _inside(ctx, p) or not p.is_dir():
             return ToolResult(False, output=f"not a directory: {args.get('path')}")
+        blocked = ctx.gate_read(_rel(ctx, p))
+        if blocked:
+            return ToolResult(False, summary=blocked, output=f"not listed ({blocked}).")
         rows = []
         for e in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name)):
             if e.name.startswith(".") and e.name not in (".gitignore",):
@@ -333,6 +352,9 @@ class Tree(Tool):
         root = _resolve(ctx, args.get("path", "."))
         if not _inside(ctx, root) or not root.is_dir():
             return ToolResult(False, output="not a directory")
+        blocked = ctx.gate_read(_rel(ctx, root))
+        if blocked:
+            return ToolResult(False, summary=blocked, output=f"not shown ({blocked}).")
         maxd = int(args.get("depth", 3) or 3)
         out: List[str] = []
         count = [0]
@@ -378,6 +400,11 @@ class Glob(Tool):
         except Exception as e:
             return ToolResult(False, output=f"bad glob: {e}")
         for pth in it:
+            # A pattern like "../../etc/*" would otherwise walk straight out of
+            # the workspace. Resolve and confine every hit (glob/grep are in the
+            # read-only plan toolset too, so this is the only guard).
+            if not _inside(ctx, pth.resolve()):
+                continue
             if any(s in pth.parts for s in Tree._SKIP):
                 continue
             if pth.is_file():
@@ -419,7 +446,16 @@ class Grep(Tool):
         except Exception as e:
             return ToolResult(False, output=f"bad glob: {e}")
         for pth in candidates:
+            # Confine every hit to the workspace — a "../" glob must not read
+            # arbitrary host files (glob/grep are also the read-only plan tools).
+            if not _inside(ctx, pth.resolve()):
+                continue
             if any(s in pth.parts for s in Tree._SKIP) or not pth.is_file():
+                continue
+            # Honour an explicit read-deny rule: don't leak a denied file's
+            # contents through a search either.
+            if ctx.permissions is not None and \
+                    ctx.permissions.evaluate("read", str(pth.relative_to(root))) == "deny":
                 continue
             try:
                 for i, ln in enumerate(pth.read_text("utf-8", "replace").splitlines(), 1):

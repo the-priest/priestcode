@@ -83,6 +83,10 @@ class Config:
             v = os.environ.get(env)
             if v:
                 return v.strip()
+        # 3. a provider that serves free models on a fixed public token
+        #    (OpenCode Zen) — so free providers work with zero setup.
+        if prov.public_token:
+            return prov.public_token
         return ""
 
     def has_key(self) -> bool:

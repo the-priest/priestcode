@@ -181,8 +181,14 @@ class Client:
                         idx = tc.get("index")
                         if idx is None:
                             idx = len(tc_acc)
-                        if fn.get("name") and idx in tc_acc and tc_acc[idx].get("name"):
-                            # a new call under a reused index → new slot
+                        if (fn.get("name") and idx in tc_acc
+                                and tc_acc[idx].get("name")
+                                and fn["name"] != tc_acc[idx]["name"]):
+                            # a genuinely DIFFERENT call reusing the index → new
+                            # slot. Only split when the name actually differs:
+                            # some providers resend function.name on every chunk
+                            # of the SAME call, and splitting those produced two
+                            # half-JSON slots with a colliding id.
                             idx = max(tc_acc) + 1 if tc_acc else 0
                         slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
                         if tc.get("id"):

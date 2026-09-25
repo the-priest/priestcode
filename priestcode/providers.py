@@ -43,6 +43,9 @@ class Provider:
     models: Tuple[Model, ...] = field(default_factory=tuple)
     signup: str = ""                 # where to get a key
     needs_key: bool = True
+    public_token: str = ""           # a fixed token used when no key is set
+    #                                  (OpenCode Zen serves free models on
+    #                                  `Bearer public` — zero sign-up)
 
     def model(self, model_id: str) -> Optional[Model]:
         for m in self.models:
@@ -101,19 +104,27 @@ _SF_MODELS = (
 )
 
 # ── OpenRouter — the FREE tier ───────────────────────────────────────
-# OpenRouter serves several strong models at zero cost under the `:free`
-# suffix. Ids drift over time, so these are sensible defaults the user can
-# override; a bad id degrades to a clean error, never a crash.
-_OR_DEEPSEEK_FREE = Model(
-    "deepseek/deepseek-chat-v3.1:free", "DeepSeek V3.1 (free)", 163,
-    "free", thinking_off=True,
-    note="Free on OpenRouter. Same family the harness is tuned for.")
+# OpenRouter serves many models at zero cost under the `:free` suffix, but the
+# specific ids churn constantly (a model that is free this month is gone the
+# next). So the DEFAULT here is the meta-router `openrouter/free`, which
+# OpenRouter itself keeps pointed at a live free model AND filters for the
+# features the request needs — including tool calling — so native
+# function-calling keeps working no matter which concrete model it lands on.
+# The named entries below are current-as-of-catalog convenience picks; a stale
+# one degrades to a clean error, and `priest models --live` always lists the
+# real, current free set.
+_OR_AUTO_FREE = Model(
+    "openrouter/free", "Auto (free, tool-capable)", 128, "free",
+    note="OpenRouter picks a live FREE model that supports tools. Robust default.")
+_OR_GLM_FREE = Model(
+    "z-ai/glm-5.2:free", "GLM 5.2 (free)", 200, "free",
+    reasoning_effort=True, note="Free flagship-class GLM; strong agent model.")
 _OR_QWEN_FREE = Model(
-    "qwen/qwen3-coder:free", "Qwen3 Coder (free)", 262, "free",
-    note="Free, coding-tuned, big context.")
-_OR_LLAMA_FREE = Model(
-    "meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B (free)", 131,
-    "free", note="Free general model.")
+    "qwen/qwen3.8-27b:free", "Qwen3.8 27B (free)", 128, "free",
+    note="Free general/coding model.")
+_OR_NEMOTRON_FREE = Model(
+    "nvidia/nemotron-3-super-120b-a12b:free", "Nemotron 3 Super 120B (free)",
+    128, "free", note="Free large NVIDIA model.")
 
 
 CATALOG: Dict[str, Provider] = {
@@ -127,23 +138,31 @@ CATALOG: Dict[str, Provider] = {
         "openrouter", "OpenRouter (free tier)",
         "https://openrouter.ai/api/v1",
         ("OPENROUTER_API_KEY", "PRIEST_API_KEY"),
-        (_OR_DEEPSEEK_FREE, _OR_QWEN_FREE, _OR_LLAMA_FREE),
+        (_OR_AUTO_FREE, _OR_GLM_FREE, _OR_QWEN_FREE, _OR_NEMOTRON_FREE),
         signup="https://openrouter.ai/keys  (free key; free models cost $0)"),
     "zen": Provider(
-        "zen", "OpenCode Zen",
+        "zen", "OpenCode Zen (free, no sign-up)",
         "https://opencode.ai/zen/v1",
         ("OPENCODE_API_KEY", "ZEN_API_KEY", "PRIEST_API_KEY"),
         (
-            Model("muse-spark-1.3", "Muse Spark 1.3 (free)", 128, "free",
-                  note="Free on Zen. The default Zen pick."),
-            Model("grok-code", "Grok Code (free)", 256, "free",
-                  note="Coding-tuned, free on Zen."),
-            Model("qwen3-coder", "Qwen3 Coder", 262, "",
-                  note="Strong open coder via Zen."),
-            Model("kimi-k2", "Kimi K2", 128, "", note="Agentic model via Zen."),
+            Model("muse-spark-1.3-contributor-free", "Muse Spark 1.3 (free)",
+                  128, "free",
+                  note="Free on Zen, no sign-up. The default Zen pick."),
+            Model("deepseek-v4-flash-free", "DeepSeek-V4-Flash (free)", 1049,
+                  "free", thinking_off=True,
+                  note="Free on Zen — the exact family the harness is tuned for."),
+            Model("mimo-v2.5-free", "MiMo V2.5 (free)", 128, "free",
+                  note="Free coding model on Zen."),
+            Model("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (free)",
+                  128, "free", note="Free fast model on Zen."),
+            Model("big-pickle", "Big Pickle (free)", 128, "free",
+                  note="Free experimental model on Zen."),
         ),
-        signup="https://opencode.ai/zen  (sign in, create a key). "
-               "`priest models --live` lists everything Zen serves."),
+        signup="https://opencode.ai/zen  — free models need NO key (a fixed "
+               "`public` token is used). `priest models --live` lists the "
+               "current free set (they rotate).",
+        needs_key=False,
+        public_token="public"),
     "openai": Provider(
         "openai", "OpenAI-compatible (custom)",
         "https://api.openai.com/v1",

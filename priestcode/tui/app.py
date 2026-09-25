@@ -354,6 +354,11 @@ class PriestApp(App):
         self.agent.client.provider = prov
         self.agent.config.provider = prov.id
         self.agent.config.model = m.id
+        # Switching to a DIFFERENT provider must also repoint the client's
+        # endpoint and key, or the new model id gets sent to the old provider's
+        # URL with the old key (auth/endpoint failure).
+        self.agent.client.base_url = self.agent.config.base_url()
+        self.agent.client.api_key = self.agent.config.resolved_key()
         self.query_one("#header", Static).update(self._header_text())
         log.write(Text(f"  model → {m.label}  [{prov.id}]", style=self._col()["ok"]))
 

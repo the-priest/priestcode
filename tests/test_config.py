@@ -42,7 +42,7 @@ ck("provider persisted", cfg2.provider == "openrouter")
 ck("approval persisted", cfg2.approval == "yolo")
 ck("key persisted", cfg2.resolved_key() == "sk-or-test")
 ck("openrouter default model is a free one",
-   ":free" in cfg2.model_id(), cfg2.model_id())
+   "free" in cfg2.model_id(), cfg2.model_id())
 
 print("\n== config perms are 0600 (keys not world-readable) ==")
 import stat  # noqa: E402
@@ -74,6 +74,20 @@ ck("openrouter has a free model", any(m.price == "free"
    for m in P.get_provider("openrouter").models))
 ck("deepseek default is thinking_off",
    P.get_provider("siliconflow").default_model().thinking_off)
+
+print("\n== zen serves free models with NO key (public token) ==")
+_zen = P.get_provider("zen")
+ck("zen needs no key", _zen.needs_key is False)
+ck("zen carries a public token", _zen.public_token == "public")
+_zcfg = C.Config(provider="zen")
+_zcfg.keys = {}
+ck("zen resolves the public token with no key set",
+   _zcfg.resolved_key() == "public", _zcfg.resolved_key())
+ck("zen counts as having a key (free, usable out of the box)", _zcfg.has_key())
+ck("zen default is muse-spark free (the user's pick)",
+   "muse-spark" in _zcfg.model_id(), _zcfg.model_id())
+ck("a key-required provider with no key does NOT get a fake token",
+   C.Config(provider="siliconflow", keys={}).resolved_key() == "")
 
 print(f"\n{_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

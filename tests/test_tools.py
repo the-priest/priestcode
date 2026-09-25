@@ -94,5 +94,37 @@ r = tools["todo"].run({"items": [{"text": "a", "status": "done"},
                                  {"text": "b", "status": "doing"}]}, ctx)
 ck("todo ok + normalised", r.ok and len(r.detail["items"]) == 2, str(r))
 
+print("\n== grep/glob cannot escape the workspace ==")
+# plant a secret OUTSIDE the workspace, a sibling of it
+outside = ws.parent / f"pc_secret_{os.getpid()}.txt"
+outside.write_text("root:x:0:0:SECRET\n")
+try:
+    gr = tools["grep"].run({"pattern": "SECRET", "glob": "../*"}, ctx)
+    ck("grep with a ../ glob finds nothing outside the workspace",
+       "SECRET" not in (gr.output or ""), str(gr.output)[:120])
+    gl = tools["glob"].run({"pattern": "../*"}, ctx)
+    ck("glob with a ../ pattern lists nothing outside the workspace",
+       outside.name not in (gl.output or ""), str(gl.output)[:120])
+finally:
+    try:
+        outside.unlink()
+    except Exception:
+        pass
+
+print("\n== read tools honour an explicit permission deny rule ==")
+from priestcode import permissions as _PERM  # noqa: E402
+(ws / "secret.env").write_text("API_KEY=xyz\n")
+_rules = _PERM.Ruleset.from_config([{"action": "read", "resource": "secret.env",
+                                     "effect": "deny"}])
+dctx = T.ToolContext(cwd=ws, approve=lambda k, p, d: True,
+                     approval_mode="yolo", permissions=_rules)
+rr = tools["read_file"].run({"path": "secret.env"}, dctx)
+ck("read_file blocked by a deny rule", not rr.ok and "xyz" not in (rr.output or ""),
+   str(rr)[:120])
+# a non-denied file still reads fine under the same ruleset
+(ws / "ok.txt").write_text("fine\n")
+rr2 = tools["read_file"].run({"path": "ok.txt"}, dctx)
+ck("a non-denied file still reads", rr2.ok and "fine" in rr2.output, str(rr2)[:80])
+
 print(f"\n{_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)
