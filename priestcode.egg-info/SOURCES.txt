@@ -338,6 +338,7 @@ tests/test_agent.py
 tests/test_cli.py
 tests/test_client.py
 tests/test_config.py
+tests/test_efficiency.py
 tests/test_features.py
 tests/test_feed.py
 tests/test_harness.py

@@ -120,10 +120,20 @@ is serving right now.
 - **SiliconFlow** — the tuned home turf. The full catalog: DeepSeek
   (V4.1-Flash *(default)*, V4-Flash, V3.2, V3.1, R1, V3), GLM (5.3-Flash, 4.6,
   4.5, 4.5-Air), Qwen3 Coder, QwQ, Kimi-K2, MiniMax.
-- **OpenRouter** — a genuine **free tier** (the `:free` models cost nothing).
-- **OpenCode Zen** — free models with **no sign-up** (a fixed `public` token):
-  Muse Spark 1.3, DeepSeek-V4-Flash, MiMo, Nemotron, Big Pickle. IDs rotate —
-  `priest models --live` shows the current set.
+- **Google Gemini** — the easiest **truly free** tier: no credit card, just a
+  Google login. Get a key at aistudio.google.com/apikey, run `priest auth`.
+  (gemini-2.5-flash / flash-lite / 2.0-flash / 2.5-pro.)
+- **Groq** — free and very fast; a free key (no card) at console.groq.com/keys.
+- **OpenRouter** — a genuine free tier (`:free` models). Needs a free key AND
+  data-sharing enabled at openrouter.ai/settings/privacy, or free models return
+  "no endpoints". Free ids rotate — `priest models --live`.
+- **OpenCode Zen** — requires a Zen API key for every model (incl. free ones).
+  If you already use Zen in **OpenCode**, priestcode **reuses that key
+  automatically** (from OpenCode's `auth.json`) — no re-auth.
+
+> There is no truly keyless cloud LLM — "free" means the tokens cost $0, but a
+> (free) key is still needed. Gemini is the no-credit-card path. If a provider
+> already works for you in OpenCode, priestcode picks up its key for you.
 - **OpenAI-compatible** — point `base_url` at Ollama, vLLM, LM Studio, Together…
 
 Switch anytime with `ctrl+o`, `/model <id>`, or `priest -m <id>`.

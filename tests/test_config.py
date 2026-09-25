@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """test_config.py + providers — settings load/save/coerce, key resolution
 (explicit → env), and catalog integrity."""
+import json
 import os
 import sys
 import tempfile
@@ -65,7 +66,9 @@ ck("approval reset to diff", bad.approval == "diff")
 ck("top_p clamped <=1", bad.top_p <= 1.0)
 
 print("\n== provider catalog integrity ==")
-ck("four providers", set(P.CATALOG) == {"siliconflow", "openrouter", "openai", "zen"})
+ck("providers include the free ones",
+   {"siliconflow", "openrouter", "gemini", "groq", "zen", "openai"} <= set(P.CATALOG),
+   str(sorted(P.CATALOG)))
 for pid, prov in P.CATALOG.items():
     ck(f"{pid}: has models", len(prov.models) >= 1)
     ck(f"{pid}: base_url is https", prov.base_url.startswith("https://"))
@@ -75,19 +78,32 @@ ck("openrouter has a free model", any(m.price == "free"
 ck("deepseek default is thinking_off",
    P.get_provider("siliconflow").default_model().thinking_off)
 
-print("\n== zen serves free models with NO key (public token) ==")
-_zen = P.get_provider("zen")
-ck("zen needs no key", _zen.needs_key is False)
-ck("zen carries a public token", _zen.public_token == "public")
-_zcfg = C.Config(provider="zen")
-_zcfg.keys = {}
-ck("zen resolves the public token with no key set",
-   _zcfg.resolved_key() == "public", _zcfg.resolved_key())
-ck("zen counts as having a key (free, usable out of the box)", _zcfg.has_key())
-ck("zen default is muse-spark free (the user's pick)",
-   "muse-spark" in _zcfg.model_id(), _zcfg.model_id())
-ck("a key-required provider with no key does NOT get a fake token",
-   C.Config(provider="siliconflow", keys={}).resolved_key() == "")
+print("\n== free providers exist and are keyed (no fake keyless claims) ==")
+_gem = P.get_provider("gemini")
+ck("gemini is a free, no-card provider", any(m.price == "free" for m in _gem.models))
+ck("gemini base is the OpenAI-compat endpoint",
+   "generativelanguage.googleapis.com" in _gem.base_url and
+   _gem.base_url.endswith("/openai"))
+ck("gemini requires a key (honest)", _gem.needs_key is True)
+ck("zen requires a key (no fake public token)",
+   P.get_provider("zen").needs_key is True
+   and not P.get_provider("zen").public_token)
+
+print("\n== priestcode reuses a key already set up in OpenCode ==")
+_tmp = tempfile.mkdtemp()
+os.environ["XDG_DATA_HOME"] = _tmp
+_ocdir = os.path.join(_tmp, "opencode")
+os.makedirs(_ocdir, exist_ok=True)
+with open(os.path.join(_ocdir, "auth.json"), "w") as _fh:
+    _fh.write(json.dumps({"opencode": {"type": "api", "key": "zen-abc-123"},
+                          "google": {"type": "api", "key": "gem-xyz-789"}}))
+ck("zen key is picked up from OpenCode's auth.json",
+   C.opencode_key("zen") == "zen-abc-123", C.opencode_key("zen"))
+ck("gemini key is picked up too", C.opencode_key("gemini") == "gem-xyz-789")
+_zc = C.Config(provider="zen", keys={})
+ck("a zen Config with no key resolves via OpenCode",
+   _zc.resolved_key() == "zen-abc-123" and _zc.has_key())
+del os.environ["XDG_DATA_HOME"]
 
 print(f"\n{_p} passed, {_f} failed")
 sys.exit(1 if _f else 0)

@@ -92,6 +92,7 @@ class Agent:
              "content": system_prompt(self.tools, str(workspace),
                                       self._extra_context())}]
         self._stop = False
+        self._healed = False        # did we already swap in a live free model?
         self._emit = None           # the current send()'s event sink (for subagents)
         self.todos: List[Dict[str, str]] = []
         self.cost_tokens = 0        # running completion-token total for the session
@@ -111,7 +112,10 @@ class Agent:
         if self.skills:
             try:
                 from .skills import skills_index
-                parts.append("# Skills\n" + skills_index(self.skills))
+                # LEAN index: categories + counts only (~700 chars, not ~6k). The
+                # model searches/lists names on demand with the `skill` tool, so we
+                # don't spend >1k tokens listing every skill on EVERY turn.
+                parts.append("# Skills\n" + skills_index(self.skills, names=False))
             except Exception:
                 pass
         if self.enable_subagents and "task" in self._extra_tools:
@@ -210,6 +214,65 @@ class Agent:
     def undo(self) -> Optional[str]:
         return self.snapshots.undo()
 
+    # ── context/token efficiency ──────────────────────────────────────
+    _MODEL_OUTPUT_CAP = 24000    # model-facing cap on one tool result (UI gets full)
+
+    def _cap(self, output: str) -> str:
+        """Cap a tool result before it enters the history the model re-reads every
+        turn. The UI already received the full output; the model rarely needs
+        more than this, and an uncapped 5,000-line read would bloat every
+        subsequent request."""
+        if output and len(output) > self._MODEL_OUTPUT_CAP:
+            head = output[:self._MODEL_OUTPUT_CAP]
+            return (head + f"\n… [output truncated at {self._MODEL_OUTPUT_CAP:,} "
+                    "chars to save context; re-read a specific slice if needed]")
+        return output
+
+    def _ctx_budget(self) -> int:
+        # keep roughly half the window for the reply; clamp to a sane ceiling so a
+        # 1M-context model doesn't let history grow to a fortune per turn.
+        ctx = int(getattr(self.model, "context", 128) or 128) * 1000
+        return max(8000, min(int(ctx * 0.5), 200_000))
+
+    def _history_tokens(self) -> int:
+        return sum(len(str(m.get("content") or "")) for m in self.messages) // 4
+
+    def _compact_history(self, emit: "Emit") -> None:
+        """Keep the request bounded on long sessions: when history exceeds the
+        budget, elide OLD tool outputs first (never deleting a message, so native
+        tool_call↔tool pairing stays intact), then trim old prose. System prompt
+        and the last few messages are always kept whole."""
+        budget = self._ctx_budget()
+        if self._history_tokens() <= budget:
+            return
+        keep_tail = 8
+        msgs = self.messages
+        elided = 0
+        for m in msgs[1:max(1, len(msgs) - keep_tail)]:
+            content = m.get("content")
+            if not isinstance(content, str) or len(content) < 400:
+                continue
+            role = m.get("role")
+            if role == "tool":
+                m["content"] = content[:160] + "\n… [older tool output elided]"
+                elided += 1
+            elif role == "user" and "<tool_result" in content:
+                m["content"] = "[older tool results elided to save context]"
+                elided += 1
+            if self._history_tokens() <= budget:
+                break
+        if self._history_tokens() > budget:
+            for m in msgs[1:max(1, len(msgs) - keep_tail)]:
+                content = m.get("content")
+                if (isinstance(content, str) and len(content) > 800
+                        and not m.get("tool_calls")):
+                    m["content"] = content[:400] + "\n… [trimmed to save context]"
+                if self._history_tokens() <= budget:
+                    break
+        if elided:
+            emit(E.Notice(f"context compacted — {elided} old tool output(s) elided "
+                          "to stay within the model's window", "info"))
+
     # ── one full request (may span many model turns) ─────────────────
     def send(self, user_text: str, emit: Emit, approve: Approve) -> None:
         from . import context as _context
@@ -227,10 +290,19 @@ class Agent:
                 emit(E.Done(steps, "stopped"))
                 return
             steps += 1
+            self._compact_history(emit)     # bound the request on long sessions
             emit(E.TurnStarted(steps))
             emit(E.Status("waiting", "waiting for the model…"))
             comp = self._one_turn(emit)
             if comp.error:
+                # a free model id that rotated out (404 / "no endpoints") heals
+                # itself: fetch the provider's live free set and switch, so the
+                # operator never has to edit code when models change.
+                if (comp.model_missing and not self._healed
+                        and self._heal_free_model(emit)):
+                    self._healed = True
+                    steps -= 1              # this failed turn doesn't count
+                    continue
                 emit(E.Notice(comp.error, "error"))
                 emit(E.Done(steps, "error"))
                 return
@@ -272,7 +344,7 @@ class Agent:
                     # round-trip as a role:"tool" message with the call id
                     self.messages.append({"role": "tool",
                                           "tool_call_id": c["id"],
-                                          "content": output})
+                                          "content": self._cap(output)})
                 continue
 
             # ── FALLBACK PATH: the text <tool> protocol ──
@@ -313,11 +385,31 @@ class Agent:
                 status = "ok" if ok else "error"
                 result_blocks.append(
                     f'<tool_result name="{call.name}" status="{status}">\n'
-                    f'{output}\n</tool_result>')
+                    f'{self._cap(output)}\n</tool_result>')
             self.messages.append(
                 {"role": "user", "content": "\n".join(result_blocks)})
         emit(E.Notice(f"hit the {self.config.max_steps}-step ceiling", "warn"))
         emit(E.Done(steps, "max_steps"))
+
+    def _heal_free_model(self, emit: "Emit") -> bool:
+        """The configured/default model 404'd — fetch the provider's LIVE free
+        models and switch to one, so a rotated-out id fixes itself. Prefers a
+        model on the same tuned family, else the first live free one."""
+        try:
+            from . import providers as _P
+            rows = self.client.fetch_model_rows()
+            free = _P.live_free_models(self.provider, rows)
+            if not free:
+                return False
+            pick = next((m for m in free if "deepseek" in m.id.lower()), free[0])
+            self.model = pick
+            self.config.model = pick.id
+            emit(E.Notice(
+                f"model unavailable — switched to live free model '{pick.id}'",
+                "warn"))
+            return True
+        except Exception:
+            return False
 
     # ── one model turn (streamed) ────────────────────────────────────
     def _one_turn(self, emit: Emit) -> Completion:

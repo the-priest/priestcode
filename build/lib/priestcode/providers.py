@@ -254,3 +254,55 @@ def all_models() -> List[Tuple[str, Model]]:
         for m in p.models:
             out.append((pid, m))
     return out
+
+
+def _row_is_free(provider_id: str, model_id: str, row: dict) -> bool:
+    """Best-effort 'is this live model free?' across providers."""
+    mid = model_id.lower()
+    if ":free" in mid or mid.endswith("-free") or "-free-" in mid:
+        return True
+    # OpenRouter (and many OpenAI-compat catalogs) expose per-token pricing.
+    pr = row.get("pricing") if isinstance(row.get("pricing"), dict) else None
+    if pr is not None:
+        try:
+            if float(pr.get("prompt", 0) or 0) == 0 and \
+               float(pr.get("completion", 0) or 0) == 0:
+                return True
+        except Exception:
+            pass
+    # some catalogs use a boolean/flag
+    if row.get("free") is True or str(row.get("cost", "")).lower() == "free":
+        return True
+    return False
+
+
+def _row_context(row: dict, default_k: int = 128) -> int:
+    for key in ("context_length", "context", "max_context_length"):
+        v = row.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return int(v) // 1000 or default_k
+    tp = row.get("top_provider")
+    if isinstance(tp, dict) and tp.get("context_length"):
+        try:
+            return int(tp["context_length"]) // 1000 or default_k
+        except Exception:
+            pass
+    return default_k
+
+
+def live_free_models(provider: "Provider", rows: List[dict]) -> List[Model]:
+    """Build Model objects for the FREE models a provider is serving right now,
+    from its live /models rows. This is what lets the picker show fresh free
+    models and lets a rotated-out default heal itself — no code change needed."""
+    out: List[Model] = []
+    seen = set()
+    for r in rows:
+        mid = r.get("id")
+        if not mid or mid in seen:
+            continue
+        if _row_is_free(provider.id, mid, r):
+            seen.add(mid)
+            label = str(r.get("name") or mid.split("/")[-1])[:40]
+            out.append(Model(mid, label, _row_context(r), "free",
+                             note="live free model"))
+    return out

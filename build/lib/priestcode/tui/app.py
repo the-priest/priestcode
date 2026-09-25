@@ -257,6 +257,9 @@ class PriestApp(App):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Model: switch…", "Pick the model to use",
                             self.action_pick_model)
+        yield SystemCommand("Model: live free…",
+                            "fetch the provider's CURRENT free models and pick one",
+                            self.action_pick_live_model)
         for mode, desc in (("diff", "auto-apply edits, confirm shell"),
                            ("confirm", "confirm every write and command"),
                            ("yolo", "auto-approve everything (still blocks "
@@ -379,6 +382,48 @@ class PriestApp(App):
                 pid, mid = result.split("||", 1)
                 self._switch_model(mid, pid)
         self.push_screen(PickerModal("Switch model", opts, picked), picked)
+
+    def action_pick_live_model(self) -> None:
+        """Fetch the current provider's live FREE models (in a worker, so the UI
+        never blocks) and open a picker — so the operator always gets fresh ids
+        without touching code when the provider rotates them."""
+        self._set_status("fetching live free models…")
+        self._fetch_live_free()
+
+    @work(thread=True, exclusive=True, group="livemodels")
+    def _fetch_live_free(self) -> None:
+        from .. import providers as _P
+        try:
+            rows = self.agent.client.fetch_model_rows()
+            free = _P.live_free_models(self.agent.provider, rows)
+        except Exception:
+            free = []
+        self.call_from_thread(self._show_live_free, free)
+
+    def _show_live_free(self, free) -> None:
+        c = self._col()
+        if not free:
+            self._set_status("no live free models found (network/key?)")
+            self.query_one("#log", RichLog).write(Text(
+                "  couldn't fetch live free models — check the network/key, or "
+                "try `/models`", style=c["warn"]))
+            return
+        opts = []
+        for m in free:
+            label = Text()
+            label.append(m.label, style="bold")
+            label.append("  free", style=c["ok"])
+            label.append(f"\n  {m.id}", style=c["dim"])
+            opts.append((f"{self.agent.provider.id}||{m.id}", label))
+
+        def picked(result):
+            if result:
+                pid, mid = result.split("||", 1)
+                self._switch_model(mid, pid)
+        self._set_status(f"{len(free)} live free models")
+        self.push_screen(
+            PickerModal(f"Live free models · {self.agent.provider.label}",
+                        opts, picked), picked)
 
     def _switch_model(self, model_id: str, provider_id: str = "") -> None:
         log = self.query_one("#log", RichLog)

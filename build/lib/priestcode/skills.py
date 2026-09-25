@@ -123,16 +123,27 @@ def load_skills(workspace: Optional[Path] = None) -> Dict[str, Skill]:
 
 
 # ── the compact index that goes into the system prompt ─────────────────
-def skills_index(skills: Dict[str, Skill], max_inline: int = 0) -> str:
-    """A compact, category-grouped catalogue for the system prompt. With
-    max_inline=0 (default) it lists ONLY the categories and counts — the model
-    drills in with the `skill` tool. With a positive max_inline it inlines up to
-    that many `name — description` lines per category."""
+def skills_index(skills: Dict[str, Skill], max_inline: int = 0,
+                 names: bool = True) -> str:
+    """A category-grouped catalogue for the system prompt.
+
+    The default (names=True, max_inline=0) lists categories with a sample of
+    names. `names=False` is the LEAN form — just categories and counts, ~700
+    chars instead of ~6k — since the `skill` tool can search/list the actual
+    names on demand. That trims well over a thousand tokens off EVERY request,
+    at the cost of one `skill search` round-trip when a skill is actually needed.
+    A positive max_inline inlines that many `name — description` lines per
+    category (verbose)."""
     if not skills:
         return ""
     by_cat: Dict[str, List[Skill]] = {}
     for sk in skills.values():
         by_cat.setdefault(sk.category, []).append(sk)
+    if not names and max_inline <= 0:
+        cats = ", ".join(f"{c} ({len(v)})" for c, v in sorted(by_cat.items()))
+        return (f"{len(skills)} skills installed. Find and load one with the "
+                f"`skill` tool (search by task, or list a category) BEFORE doing "
+                f"the kind of work it covers. Categories: {cats}.")
     lines = [f"{len(skills)} skills are installed, grouped by category. Use the "
              "`skill` tool to find and load the ones a task needs — load a skill "
              "BEFORE doing the kind of work it covers."]
@@ -146,9 +157,9 @@ def skills_index(skills: Dict[str, Skill], max_inline: int = 0) -> str:
                 lines.append(f"  …and {len(items) - max_inline} more "
                              f"(`skill list {cat}`)")
         else:
-            names = ", ".join(s.name for s in items[:12])
+            names_s = ", ".join(s.name for s in items[:12])
             more = f", +{len(items) - 12} more" if len(items) > 12 else ""
-            lines.append(f"- {cat} ({len(items)}): {names}{more}")
+            lines.append(f"- {cat} ({len(items)}): {names_s}{more}")
     return "\n".join(lines)
 
 

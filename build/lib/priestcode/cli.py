@@ -184,7 +184,9 @@ def _subcommand(name: str, args) -> int:
                 if m.reasoning_effort:
                     tags.append("reasoning-dial")
                 print(f"    {m.id:44} {m.label:22} {' '.join(tags)}")
-        # live catalog for the active/selected provider
+        # live catalog for the active/selected provider — the source of truth for
+        # currently-available (and currently-free) models, so ids that rotate are
+        # always discoverable without editing anything.
         if getattr(args, "live", False):
             cfg = C.load()
             if args.provider:
@@ -194,11 +196,19 @@ def _subcommand(name: str, args) -> int:
                 print(f"\n(--live needs a key for {prov.label}; run `priest auth`)")
                 return 0
             from .client import Client
-            print(f"\nLive from {prov.label}:")
-            ids = Client(prov, cfg.base_url(), cfg.resolved_key()).list_models_live()
-            if not ids:
-                print("  (could not fetch — network or key issue)")
-            for i in sorted(ids):
+            rows = Client(prov, cfg.base_url(), cfg.resolved_key()).fetch_model_rows()
+            if not rows:
+                print(f"\n(could not fetch live models from {prov.label} — "
+                      "network, key, or the endpoint is down)")
+                return 0
+            free = P.live_free_models(prov, rows)
+            if free:
+                print(f"\nLive FREE models on {prov.label} "
+                      f"(use with `priest -m <id>`):")
+                for m in free:
+                    print(f"    {m.id}")
+            print(f"\nAll live models on {prov.label} ({len(rows)}):")
+            for i in sorted(r.get("id") for r in rows):
                 print(f"    {i}")
         return 0
 

@@ -47,7 +47,7 @@ ck("off-peak cost = in*0.15 + out*0.60 per 1M",
    abs(v41.cost_usd(1_000_000, 0, offpeak) - 0.15) < 1e-9
    and abs(v41.cost_usd(0, 1_000_000, offpeak) - 0.60) < 1e-9)
 ck("free model costs nothing",
-   P.get_provider("zen").model("muse-spark-1.3-contributor-free").cost_usd(9e9, 9e9) == 0.0)
+   P.get_provider("gemini").model("gemini-2.5-flash").cost_usd(9e9, 9e9) == 0.0)
 
 print("\n== free-tier resilience: a provider that rejects params still works ==")
 import io           # noqa: E402
