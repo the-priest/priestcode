@@ -76,6 +76,30 @@ priest
 | **MCP** | connect MCP servers (GitHub, DBs, docs) as tools, just like OpenCode |
 | **Live themes** | `priest`, `opencode`, `mono` — switch instantly from the palette |
 | **`priest init`** | scans the repo and writes a starter `AGENTS.md` |
+| **300+ skills** | a bundled library of packaged expertise the agent loads on demand |
+| **Specialist subagents** | delegate a focused job to a security/test/debug/… specialist |
+
+### Skills — 300+ packaged playbooks
+
+Priest Code ships a library of **300+ skills**: focused markdown playbooks (when to
+use, a concrete checklist, the pitfalls, the commands) across languages,
+frameworks, databases, devops, testing, data/ML, mobile, web, algorithms, game
+dev, AI-agent building — and, heaviest of all, **offensive security** (the full
+web top-10, injection classes, recon, exploitation, privesc, crypto, cloud,
+mobile, and blue-team). The model sees a compact index and loads a skill's full
+body on demand with the `skill` tool, so expertise is always available but never
+wastes context. Drop your own in `.priest/skills/` (project) or
+`~/.config/priestcode/skills/` (global) — same simple format, and yours win.
+
+### Subagents — delegate to a specialist
+
+The `task` tool hands a focused job to a **specialist subagent** — `security-auditor`,
+`code-reviewer`, `debugger`, `test-writer`, `refactorer`, `performance`,
+`database`, `frontend`, `backend`, `devops`, `cryptographer`, and more. Each runs
+its own short, sharpened loop with the right tools (auditors are read-only) and
+hands back just the result, keeping the main agent's context clean. Subagents
+share the parent's approval gate — no silent escalation — and can't spawn further
+subagents, so delegation stays bounded.
 
 <div align="center">
 <img src="assets/priestcode-4-palette.svg" width="49%" alt="Command palette">
@@ -93,7 +117,9 @@ is serving right now.
   (V4.1-Flash *(default)*, V4-Flash, V3.2, V3.1, R1, V3), GLM (5.3-Flash, 4.6,
   4.5, 4.5-Air), Qwen3 Coder, QwQ, Kimi-K2, MiniMax.
 - **OpenRouter** — a genuine **free tier** (the `:free` models cost nothing).
-- **OpenCode Zen** — Muse Spark 1.3 (free), Grok Code, Qwen3 Coder, Kimi.
+- **OpenCode Zen** — free models with **no sign-up** (a fixed `public` token):
+  Muse Spark 1.3, DeepSeek-V4-Flash, MiMo, Nemotron, Big Pickle. IDs rotate —
+  `priest models --live` shows the current set.
 - **OpenAI-compatible** — point `base_url` at Ollama, vLLM, LM Studio, Together…
 
 Switch anytime with `ctrl+o`, `/model <id>`, or `priest -m <id>`.

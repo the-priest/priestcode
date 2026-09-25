@@ -37,12 +37,14 @@ class Agent:
     def __init__(self, config: Config, provider: Provider, model: Model,
                  api_key: str, workspace: Path,
                  tools: Optional[Dict[str, Tool]] = None,
-                 agent_def=None, permissions=None, instructions: str = ""):
+                 agent_def=None, permissions=None, instructions: str = "",
+                 skills=None, enable_subagents: bool = True):
         from . import agents as _agents
         from . import snapshots as _snap
         self.config = config
         self.provider = provider
         self.model = model
+        self.api_key = api_key
         self.workspace = workspace
         self.agent_def = agent_def or _agents.get(config.agent,
                                                   _agents.from_config(config.agents))
@@ -50,6 +52,7 @@ class Agent:
         self.instructions = instructions
         self.snapshots = _snap.SnapshotStack()
         self._mcp_tools: Dict[str, Tool] = {}
+        self.enable_subagents = enable_subagents
         # Native (OpenCode-style) function-calling is the primary path: a real
         # `tools` schema goes out, structured tool_calls come back. Flips off for
         # the session if a provider rejects the tools field (then the text
@@ -59,30 +62,105 @@ class Agent:
         # explicit override, plus MCP tools merged in by the caller.
         self.tools = tools or self.agent_def.toolset()
         self.client = Client(provider, config.base_url(), api_key)
-        extra = ""
-        if self.agent_def.system:
-            extra += "# Agent: " + self.agent_def.name + "\n" + self.agent_def.system
-        if instructions:
-            extra += ("\n\n# Project instructions (from AGENTS.md / config)\n"
-                      + instructions)
+
+        # ── skills + subagents: load the library once, register their tools ──
+        if skills is None:
+            try:
+                from . import skills as _skills
+                skills = _skills.load_skills(workspace)
+            except Exception:
+                skills = {}
+        self.skills = skills or {}
+        self._extra_tools: Dict[str, Tool] = {}
+        if self.skills:
+            try:
+                from .skills import SkillTool
+                self._extra_tools["skill"] = SkillTool(self.skills)
+            except Exception:
+                pass
+        if self.enable_subagents:
+            try:
+                from .subagents import TaskTool
+                self._extra_tools["task"] = TaskTool(self._spawn_subagent)
+            except Exception:
+                pass
+        # extra tools ride alongside the mode's toolset and survive mode switches
+        self.tools.update(self._extra_tools)
+
         self.messages: List[Dict[str, str]] = [
             {"role": "system",
-             "content": system_prompt(self.tools, str(workspace), extra)}]
+             "content": system_prompt(self.tools, str(workspace),
+                                      self._extra_context())}]
         self._stop = False
         self.todos: List[Dict[str, str]] = []
         self.cost_tokens = 0        # running completion-token total for the session
+
+    # ── the system-prompt tail: agent role, instructions, skills, subagents ──
+    def _extra_context(self) -> str:
+        parts: List[str] = []
+        if self.agent_def.system:
+            parts.append("# Agent: " + self.agent_def.name + "\n"
+                         + self.agent_def.system)
+        if self.instructions:
+            parts.append("# Project instructions (from AGENTS.md / config)\n"
+                         + self.instructions)
+        if self.skills:
+            try:
+                from .skills import skills_index
+                parts.append("# Skills\n" + skills_index(self.skills))
+            except Exception:
+                pass
+        if self.enable_subagents and "task" in self._extra_tools:
+            try:
+                from .subagents import registry_index
+                parts.append("# Subagents\n" + registry_index())
+            except Exception:
+                pass
+        return "\n\n".join(parts)
+
+    # ── spawn a specialist subagent, run it headless, return its result ──
+    def _spawn_subagent(self, spec, prompt: str, ctx) -> str:
+        from .tools import default_tools
+        from . import agents as _agents
+        from . import events as _E
+        allow = None if not spec.read_only else (
+            "read_file", "list_dir", "tree", "glob", "grep", "todo")
+        base = default_tools()
+        child_tools = (base if allow is None
+                       else {n: t for n, t in base.items() if n in allow})
+        child_def = _agents.Agent(name=spec.name, description=spec.description,
+                                  system=spec.system, tools=None)
+        child = Agent(self.config, self.provider, self.model, self.api_key,
+                      self.workspace, tools=child_tools, agent_def=child_def,
+                      permissions=self.permissions, instructions=self.instructions,
+                      skills=self.skills, enable_subagents=False)
+        child.config = self.config
+        # the subagent shares the parent's approval callback, so any write/run it
+        # does is gated exactly like the parent's — no silent escalation.
+        collected: List[str] = []
+
+        def _emit(ev):
+            if isinstance(ev, _E.AssistantText):
+                collected.append(ev.text)
+
+        steps_before = self.config.max_steps
+        try:
+            self.config.max_steps = min(steps_before, getattr(spec, "steps", 14))
+            child.send(prompt, _emit, ctx.approve)
+        finally:
+            self.config.max_steps = steps_before
+        out = "".join(collected).strip()
+        # keep the handback compact
+        if len(out) > 8000:
+            out = out[:8000] + "\n… (subagent output truncated)"
+        return out or "(the subagent produced no summary)"
 
     def stop(self) -> None:
         self._stop = True
 
     def _rebuild_system(self) -> None:
-        extra = ""
-        if self.agent_def.system:
-            extra += "# Agent: " + self.agent_def.name + "\n" + self.agent_def.system
-        if self.instructions:
-            extra += "\n\n# Project instructions\n" + self.instructions
         self.messages[0]["content"] = system_prompt(
-            self.tools, str(self.workspace), extra)
+            self.tools, str(self.workspace), self._extra_context())
 
     def add_tools(self, extra: Dict[str, Tool]) -> None:
         """Merge in extra tools (e.g. MCP) and rebuild the system prompt so the
@@ -100,6 +178,7 @@ class Agent:
         self.config.agent = agent_def.name
         self.tools = agent_def.toolset()
         self.tools.update(self._mcp_tools)
+        self.tools.update(self._extra_tools)   # skill/task survive a mode switch
         self._rebuild_system()
 
     def undo(self) -> Optional[str]:

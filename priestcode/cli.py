@@ -31,7 +31,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("message", nargs="*", help="an initial message to send")
     ap.add_argument("-p", "--print", dest="headless", metavar="PROMPT",
                     help="headless: run one request and print the result")
-    ap.add_argument("-P", "--provider", help="provider id (deepseek|openrouter|openai)")
+    ap.add_argument("-P", "--provider",
+                    help="provider id (siliconflow|openrouter|zen|openai)")
     ap.add_argument("-m", "--model", help="model id (overrides the default)")
     ap.add_argument("--theme", help="priest | opencode | mono")
     ap.add_argument("-a", "--agent", help="agent/mode: build | plan | <custom>")
@@ -164,7 +165,7 @@ def _headless(agent, cfg, prompt: str) -> int:
         return 2
     r = PlainRenderer(show_thinking=False)
     agent.send(prompt, r, auto_approver(cfg.approval))
-    return 0
+    return 1 if r.errored else 0    # non-zero on failure so scripts can detect it
 
 
 # ── subcommands ──────────────────────────────────────────────────────

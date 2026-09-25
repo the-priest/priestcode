@@ -35,9 +35,15 @@ class PlainRenderer:
         self.show_thinking = show_thinking
         self._buf = ""            # current assistant prose buffer
         self._thinking_started = False
+        self.errored = False      # set if the run ends in an error (headless exit code)
 
     # the event sink handed to Agent.send
     def __call__(self, ev: E.Event) -> None:
+        # track failure regardless of renderer, for the headless exit code
+        if isinstance(ev, E.Notice) and ev.level == "error":
+            self.errored = True
+        elif isinstance(ev, E.Done) and ev.reason == "error":
+            self.errored = True
         if not _RICH:
             self._plainest(ev)
             return
@@ -64,6 +70,8 @@ class PlainRenderer:
         elif isinstance(ev, E.Diff):
             self._print_diff(ev)
         elif isinstance(ev, E.Notice):
+            if ev.level == "error":
+                self.errored = True
             style = {"error": "red", "warn": "yellow", "ok": "green",
                      "gate": _ACCENT}.get(ev.level, _DIM)
             c.print(Text(f"  {ev.text}", style=style))
@@ -75,6 +83,8 @@ class PlainRenderer:
                     f"    {ev.model} · {ev.completion_tokens} tok · "
                     f"{ev.seconds:.1f}s", style=_DIM))
         elif isinstance(ev, E.Done):
+            if ev.reason == "error":
+                self.errored = True
             self._flush_prose()
 
     def _flush_prose(self) -> None:

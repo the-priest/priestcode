@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "priestcode"
-version = "1.0.0"
+version = "1.1.0"
 description = "Priest Code — a fast, transparent terminal coding agent. Opens your repo, edits it, runs your tests, and iterates until they pass."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,4 +32,13 @@ Homepage = "https://github.com/the-priest/priestcode"
 Repository = "https://github.com/the-priest/priestcode"
 
 [tool.setuptools]
-packages = ["priestcode", "priestcode.tui"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+# scope discovery to the real packages so the data-only skills/ dir is NOT
+# mistaken for an importable subpackage (it ships as package-data instead).
+include = ["priestcode", "priestcode.tui"]
+
+[tool.setuptools.package-data]
+# the bundled skill library ships with the package (flat dir, category in frontmatter)
+priestcode = ["skills/*.md"]
