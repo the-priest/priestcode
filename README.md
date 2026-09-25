@@ -68,7 +68,9 @@ priest
 | | |
 |---|---|
 | **Live activity feed** | an animated status line names exactly what it's doing right now — thinking, the reply forming, each tool, skill load, and subagent step — so it never looks frozen |
-| **Cost meter** | running tokens and **$ spent** this session, live in the header and status line (real per-model pricing) |
+| **Cost meter** | running tokens and **$ spent** this session, live in the header and status line (real, time-aware per-model pricing — off-peak vs peak) |
+| **Bounded context** | history is compacted automatically on long sessions (old tool output elided, structure kept) and tool results are capped, so requests stay small and never overflow the window |
+| **Live free models** | `priest models --live` and the palette's "Model: live free" fetch the provider's CURRENT free models; a free id that rotated out heals itself at runtime — no code edits |
 | **Command palette** (`ctrl+p`) | switch model, agent, theme, approval mode — searchable |
 | **Agents / modes** | `build` (full) and `plan` (read-only: investigate & propose), plus custom agents |
 | **Project-aware** | auto-loads `AGENTS.md` / `CLAUDE.md` / `.cursorrules` into context |

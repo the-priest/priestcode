@@ -1,0 +1,3 @@
+[console_scripts]
+priest = priestcode.cli:main
+priestcode = priestcode.cli:main

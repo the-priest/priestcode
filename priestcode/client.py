@@ -45,6 +45,7 @@ class Completion:
     # request carried a `tools` schema and the model replied with tool_calls.
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     tools_unsupported: bool = False   # provider rejected the tools field
+    model_missing: bool = False       # the model id 404'd / rotated out
 
 
 def _render_tool_calls(acc: Dict[int, Dict[str, str]]) -> str:
@@ -74,18 +75,24 @@ class Client:
         self.api_key = api_key
         self.timeout = timeout
 
-    def list_models_live(self) -> list:
-        """GET /models — the provider's live catalog (ids). [] on any failure,
-        so the picker always has the static list to fall back to."""
+    def fetch_model_rows(self, timeout: float = 12.0) -> list:
+        """GET /models — the provider's live catalog as raw rows (dicts with id,
+        pricing, context, …). [] on any failure. This is the source of truth for
+        'what free models exist RIGHT NOW', so rotated free ids heal themselves."""
         url = self.base_url + "/models"
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             rows = data.get("data") if isinstance(data, dict) else data
-            return [r.get("id") for r in rows if isinstance(r, dict) and r.get("id")]
+            return [r for r in rows if isinstance(r, dict) and r.get("id")]
         except Exception:
             return []
+
+    def list_models_live(self) -> list:
+        """Live catalog as ids (the picker falls back to the static list on []).
+        """
+        return [r.get("id") for r in self.fetch_model_rows()]
 
     def _headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -245,6 +252,10 @@ class Client:
                         comp.tools_unsupported = True
                     return comp
             comp.error = self._explain_http(e.code, detail)
+            if e.code == 404 or any(w in low for w in
+                                    ("no endpoints", "not a valid model",
+                                     "model not found", "does not exist")):
+                comp.model_missing = True
             return comp
         except urllib.error.URLError as e:
             comp.error = f"network error: {e.reason}"
