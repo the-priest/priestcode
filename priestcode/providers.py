@@ -28,10 +28,28 @@ class Model:
     id: str
     label: str
     context: int                     # context window, thousands of tokens
-    price: str = ""                  # human note, e.g. "0.13/0.28" or "free"
+    price: str = ""                  # "in/out" USD per 1M tokens, or "free"/""
     thinking_off: bool = False       # send enable_thinking:false (DeepSeek)
     reasoning_effort: bool = False   # supports a low/high/max dial (GLM etc.)
     note: str = ""
+
+    def rates(self) -> Optional[Tuple[float, float]]:
+        """(input, output) USD per 1M tokens, or None when free/unknown — so the
+        cost meter shows real spend and nothing for free models."""
+        p = (self.price or "").strip().lower()
+        if not p or p == "free":
+            return None
+        try:
+            a, _, b = p.partition("/")
+            return (float(a), float(b or a))
+        except Exception:
+            return None
+
+    def cost_usd(self, prompt_tokens: int, completion_tokens: int) -> float:
+        r = self.rates()
+        if not r:
+            return 0.0
+        return (prompt_tokens * r[0] + completion_tokens * r[1]) / 1_000_000.0
 
 
 @dataclass(frozen=True)
@@ -66,17 +84,18 @@ class Provider:
 _SF_MODELS = (
     # DeepSeek — the tuned home turf
     Model("deepseek-ai/DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash", 1049,
-          "0.13/0.28", thinking_off=True,
-          note="The tuned default. Fast, cheap, 1M context, trained for tools."),
+          "0.30/1.20", thinking_off=True,
+          note="The tuned default. 1M context, trained for tools."),
     Model("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek-V4-Flash", 1049,
-          "0.13/0.28", thinking_off=True, note="The benchmarked sibling."),
-    Model("deepseek-ai/DeepSeek-V3.2", "DeepSeek-V3.2", 163, "0.27/1.10",
+          "0.13/0.28", thinking_off=True,
+          note="The cheaper benchmarked sibling."),
+    Model("deepseek-ai/DeepSeek-V3.2", "DeepSeek-V3.2", 163, "0.26/0.42",
           thinking_off=True, note="Strong general + coding model."),
-    Model("deepseek-ai/DeepSeek-V3.1", "DeepSeek-V3.1", 163, "0.27/1.10",
+    Model("deepseek-ai/DeepSeek-V3.1", "DeepSeek-V3.1", 163, "0.27/1.00",
           thinking_off=True, note="Hybrid think/no-think; tools need think off."),
-    Model("deepseek-ai/DeepSeek-R1", "DeepSeek-R1", 163, "0.55/2.19",
+    Model("deepseek-ai/DeepSeek-R1", "DeepSeek-R1", 163, "0.50/2.18",
           note="Reasoning model."),
-    Model("deepseek-ai/DeepSeek-V3", "DeepSeek-V3", 128, "0.27/1.10",
+    Model("deepseek-ai/DeepSeek-V3", "DeepSeek-V3", 128, "0.25/1.00",
           note="The classic V3."),
     # GLM (Zhipu / zai-org)
     Model("zai-org/GLM-5.3-Flash", "GLM-5.3-Flash", 1049, "0.15/0.50",

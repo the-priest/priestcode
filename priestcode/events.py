@@ -105,11 +105,25 @@ class Notice(Event):
 
 @dataclass
 class Usage(Event):
-    """Token / timing stats for a turn."""
+    """Token / timing / cost stats — per turn AND the running session total, so a
+    frontend can show 'this turn' and 'spent so far' without its own bookkeeping."""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     seconds: float = 0.0
     model: str = ""
+    cost_usd: float = 0.0            # this turn
+    total_tokens: int = 0           # session: prompt+completion so far
+    total_cost_usd: float = 0.0     # session: $ spent so far
+
+
+@dataclass
+class Status(Event):
+    """A live, human-readable statement of what the agent is doing RIGHT NOW —
+    so the UI can show continuous activity and never look frozen. `phase` is a
+    coarse state; `text` is the specific action."""
+    phase: str                      # "thinking" | "responding" | "tool" | "skill"
+    #                                 | "subagent" | "waiting" | "idle"
+    text: str = ""
 
 
 @dataclass

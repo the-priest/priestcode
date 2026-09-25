@@ -12,5 +12,5 @@ Tuned hardest for DeepSeek-V4.1-Flash, but it speaks any OpenAI-compatible
 provider — including free tiers.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = ["__version__"]

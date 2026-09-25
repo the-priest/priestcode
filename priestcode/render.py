@@ -36,6 +36,8 @@ class PlainRenderer:
         self._buf = ""            # current assistant prose buffer
         self._thinking_started = False
         self.errored = False      # set if the run ends in an error (headless exit code)
+        self._spent = 0.0         # running $ spent (from Usage totals)
+        self._toks = 0            # running token total
 
     # the event sink handed to Agent.send
     def __call__(self, ev: E.Event) -> None:
@@ -77,15 +79,25 @@ class PlainRenderer:
             c.print(Text(f"  {ev.text}", style=style))
         elif isinstance(ev, E.TodoUpdated):
             self._print_todos(ev)
+        elif isinstance(ev, E.Status):
+            # a live one-liner of what's happening now (kept dim, transient)
+            if ev.phase in ("tool", "skill", "subagent"):
+                c.print(Text(f"  · {ev.text}", style=_DIM))
         elif isinstance(ev, E.Usage):
+            self._spent = ev.total_cost_usd or self._spent
+            self._toks = ev.total_tokens or self._toks
             if ev.completion_tokens or ev.seconds:
+                cost = f" · ${ev.cost_usd:.4f}" if ev.cost_usd else ""
                 c.print(Text(
-                    f"    {ev.model} · {ev.completion_tokens} tok · "
+                    f"    {ev.model} · {ev.completion_tokens} tok{cost} · "
                     f"{ev.seconds:.1f}s", style=_DIM))
         elif isinstance(ev, E.Done):
             if ev.reason == "error":
                 self.errored = True
             self._flush_prose()
+            if self._toks:
+                spent = f" · ${self._spent:.4f} spent" if self._spent else ""
+                c.print(Text(f"  ─ {self._toks:,} tokens{spent}", style=_DIM))
 
     def _flush_prose(self) -> None:
         text = harness.clean_reply(self._buf)

@@ -67,6 +67,8 @@ priest
 
 | | |
 |---|---|
+| **Live activity feed** | an animated status line names exactly what it's doing right now — thinking, the reply forming, each tool, skill load, and subagent step — so it never looks frozen |
+| **Cost meter** | running tokens and **$ spent** this session, live in the header and status line (real per-model pricing) |
 | **Command palette** (`ctrl+p`) | switch model, agent, theme, approval mode — searchable |
 | **Agents / modes** | `build` (full) and `plan` (read-only: investigate & propose), plus custom agents |
 | **Project-aware** | auto-loads `AGENTS.md` / `CLAUDE.md` / `.cursorrules` into context |

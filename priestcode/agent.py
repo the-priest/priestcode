@@ -92,8 +92,12 @@ class Agent:
              "content": system_prompt(self.tools, str(workspace),
                                       self._extra_context())}]
         self._stop = False
+        self._emit = None           # the current send()'s event sink (for subagents)
         self.todos: List[Dict[str, str]] = []
         self.cost_tokens = 0        # running completion-token total for the session
+        self.prompt_tokens_total = 0
+        self.completion_tokens_total = 0
+        self.spent_usd = 0.0        # running $ spent this session
 
     # ── the system-prompt tail: agent role, instructions, skills, subagents ──
     def _extra_context(self) -> str:
@@ -138,10 +142,21 @@ class Agent:
         # the subagent shares the parent's approval callback, so any write/run it
         # does is gated exactly like the parent's — no silent escalation.
         collected: List[str] = []
+        parent_emit = getattr(self, "_emit", None)
 
         def _emit(ev):
             if isinstance(ev, _E.AssistantText):
                 collected.append(ev.text)
+            # surface the subagent's work to the parent UI so a long delegation
+            # never looks frozen — the operator sees what the specialist is doing.
+            if parent_emit is not None:
+                if isinstance(ev, _E.ToolStarted):
+                    parent_emit(_E.Status(
+                        "subagent", f"↳ {spec.name}: {ev.summary or ev.name}"))
+                elif isinstance(ev, _E.Diff):
+                    parent_emit(ev)
+                elif isinstance(ev, _E.Notice) and ev.level in ("warn", "error"):
+                    parent_emit(_E.Notice(f"[{spec.name}] {ev.text}", ev.level))
 
         steps_before = self.config.max_steps
         try:
@@ -149,6 +164,17 @@ class Agent:
             child.send(prompt, _emit, ctx.approve)
         finally:
             self.config.max_steps = steps_before
+        # roll the subagent's token/$ spend into the session meter
+        self.spent_usd += child.spent_usd
+        self.prompt_tokens_total += child.prompt_tokens_total
+        self.completion_tokens_total += child.completion_tokens_total
+        self.cost_tokens += child.cost_tokens
+        if parent_emit is not None:
+            parent_emit(_E.Usage(
+                0, 0, 0.0, self.model.label, cost_usd=0.0,
+                total_tokens=(self.prompt_tokens_total
+                              + self.completion_tokens_total),
+                total_cost_usd=self.spent_usd))
         out = "".join(collected).strip()
         # keep the handback compact
         if len(out) > 8000:
@@ -188,6 +214,7 @@ class Agent:
     def send(self, user_text: str, emit: Emit, approve: Approve) -> None:
         from . import context as _context
         self._stop = False
+        self._emit = emit           # subagents forward their activity here
         user_text = _context.expand_mentions(user_text, self.workspace)
         self.messages.append({"role": "user", "content": user_text})
         ctx = ToolContext(cwd=self.workspace, approve=approve,
@@ -201,6 +228,7 @@ class Agent:
                 return
             steps += 1
             emit(E.TurnStarted(steps))
+            emit(E.Status("waiting", "waiting for the model…"))
             comp = self._one_turn(emit)
             if comp.error:
                 emit(E.Notice(comp.error, "error"))
@@ -208,9 +236,19 @@ class Agent:
                 return
             if comp.tools_unsupported:
                 self.native = False     # this provider ignores tools
+            # ── running token + cost meter (this turn AND the session total) ──
             self.cost_tokens += comp.completion_tokens
+            self.prompt_tokens_total += comp.prompt_tokens
+            self.completion_tokens_total += comp.completion_tokens
+            turn_cost = self.model.cost_usd(comp.prompt_tokens,
+                                            comp.completion_tokens)
+            self.spent_usd += turn_cost
             emit(E.Usage(comp.prompt_tokens, comp.completion_tokens,
-                         comp.seconds, self.model.label))
+                         comp.seconds, self.model.label,
+                         cost_usd=turn_cost,
+                         total_tokens=(self.prompt_tokens_total
+                                       + self.completion_tokens_total),
+                         total_cost_usd=self.spent_usd))
 
             # ── NATIVE PATH: structured tool_calls (the OpenCode contract) ──
             if comp.tool_calls:
@@ -283,10 +321,18 @@ class Agent:
 
     # ── one model turn (streamed) ────────────────────────────────────
     def _one_turn(self, emit: Emit) -> Completion:
+        seen = {"tok": False, "reason": False}
+
         def on_token(t: str):
+            if not seen["tok"]:
+                seen["tok"] = True
+                emit(E.Status("responding", "writing a reply…"))
             emit(E.AssistantText(t))
 
         def on_reasoning(t: str):
+            if not seen["reason"]:
+                seen["reason"] = True
+                emit(E.Status("thinking", "reasoning…"))
             emit(E.Thinking(t))
 
         from .tools import tools_schema
@@ -312,7 +358,17 @@ class Agent:
             return (False, "the arguments were not valid JSON. Re-send this "
                     "call with a valid JSON body.")
 
-        emit(E.ToolStarted(cid, call.name, call.args, tool.summarize(call.args)))
+        # a live, specific status so the operator always sees what's happening
+        _sum = tool.summarize(call.args)
+        if call.name == "skill":
+            emit(E.Status("skill", f"loading skill: {call.args.get('name') or _sum}"))
+        elif call.name == "task":
+            emit(E.Status("subagent", f"delegating to {call.args.get('agent', '?')}…"))
+        elif call.name == "run":
+            emit(E.Status("tool", f"running: {call.args.get('command', '')[:60]}"))
+        else:
+            emit(E.Status("tool", _sum))
+        emit(E.ToolStarted(cid, call.name, call.args, _sum))
         try:
             res = tool.run(call.args, ctx)
         except Exception as e:  # a tool must never take the loop down

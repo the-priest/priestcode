@@ -15,6 +15,7 @@ commands (those work too).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -152,10 +153,19 @@ class PriestApp(App):
         self.agent = agent
         self._start_theme = theme_name if theme_name in _theme.BY_NAME else "priest"
         self._busy = False
-        self._prose = ""
+        self._prose = ""            # unflushed tail of the streaming reply
+        self._streamed = False      # did we already stream this turn's prose live?
         self._todos = []
+        # live-activity state for the status bar (so it never looks frozen)
+        self._phase = "ready"       # what's happening right now
+        self._t0 = 0.0              # when the current request started
+        self._spin = 0              # spinner frame index
+        self._tokens = 0            # running session token total
+        self._cost = 0.0            # running session $ spent
         for th in _theme.ALL:
             self.register_theme(th)
+
+    _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     # ── theming ──────────────────────────────────────────────────────
     def _col(self) -> dict:
@@ -184,6 +194,37 @@ class PriestApp(App):
         self.query_one("#header", Static).update(self._header_text())
         self.query_one("#prompt", Input).focus()
         self._banner()
+        # a 10fps heartbeat: while the agent is busy this animates the spinner
+        # and elapsed time so the UI is visibly alive even between events.
+        self.set_interval(0.1, self._tick)
+
+    def _tick(self) -> None:
+        if not self._busy:
+            return
+        self._spin = (self._spin + 1) % len(self._SPINNER)
+        self._render_status()
+
+    def _render_status(self) -> None:
+        """The live status line: spinner · what's happening · elapsed · meter."""
+        c = self._col()
+        meter = ""
+        if self._tokens:
+            meter = f"   ·   {self._tokens:,} tok · ${self._cost:.4f}"
+        try:
+            bar = Text()
+            if self._busy:
+                elapsed = time.monotonic() - self._t0 if self._t0 else 0.0
+                bar.append(self._SPINNER[self._spin] + " ", style=c["accent"])
+                bar.append(self._phase, style=c["fg"])
+                bar.append(f"   ·   {elapsed:4.1f}s", style=c["dim"])
+                bar.append(meter, style=c["dim"])
+                bar.append("   ·   esc to stop", style=c["dim"])
+            else:
+                bar.append(self._phase, style=c["dim"])
+                bar.append(meter, style=c["dim"])
+            self.query_one("#status", Static).update(bar)
+        except Exception:
+            pass
 
     def _banner(self) -> None:
         log = self.query_one("#log", RichLog)
@@ -206,6 +247,9 @@ class PriestApp(App):
         txt.append(f"{Path(self.agent.workspace).name}/", style=c["accent2"])
         txt.append(f"   ·   {self.agent.agent_def.name}", style=c["accent"])
         txt.append(f" · {self.agent.config.approval}", style=c["dim"])
+        if self._tokens:
+            txt.append(f"   ·   {self._tokens:,} tok · ${self._cost:.4f}",
+                       style=c["dim"])
         return txt
 
     # ── command palette entries (ctrl+p) ─────────────────────────────
@@ -247,8 +291,12 @@ class PriestApp(App):
         log.write(Rule(style=self._col()["dim"]))
         log.write(Text(f"❯ {text}", style=f"bold {self._col()['user']}"))
         self._busy = True
+        self._streamed = False
+        self._prose = ""
+        self._t0 = time.monotonic()
         inp.disabled = True
-        self._set_status("thinking…")
+        self._phase = "waiting for the model…"
+        self._render_status()
         self._run_agent(text)
 
     # ── slash commands (a text alias for the palette) ────────────────
@@ -427,16 +475,19 @@ class PriestApp(App):
         log = self.query_one("#log", RichLog)
         c = self._col()
         if isinstance(ev, E.AssistantText):
-            self._prose += ev.text
+            self._stream_prose(log, c, ev.text)     # show the reply live
         elif isinstance(ev, E.Thinking):
-            self._set_status("thinking…")
+            self._phase = "reasoning…"
+        elif isinstance(ev, E.Status):
+            self._phase = ev.text
+            self._render_status()
         elif isinstance(ev, E.TurnStarted):
-            self._set_status("working…")
+            self._phase = "working…"
         elif isinstance(ev, E.TurnFinished):
             self._flush_prose(log, c)
         elif isinstance(ev, E.ToolStarted):
             log.write(Text(f"  → {ev.summary or ev.name}", style=c["accent2"]))
-            self._set_status(f"{ev.summary or ev.name}…")
+            self._phase = f"{ev.summary or ev.name}…"
         elif isinstance(ev, E.ToolFinished):
             mark, st = ("✓", c["ok"]) if ev.ok else ("✗", c["err"])
             log.write(Text(f"  {mark} {ev.summary or ev.name}", style=st))
@@ -455,18 +506,36 @@ class PriestApp(App):
             self._todos = ev.items
             self._render_todos()
         elif isinstance(ev, E.Usage):
-            if ev.completion_tokens or ev.seconds:
-                self._set_status(
-                    f"{ev.model} · {ev.completion_tokens} tok · {ev.seconds:.1f}s")
+            # keep the running session meter (tokens + $ spent)
+            if ev.total_tokens:
+                self._tokens = ev.total_tokens
+            if ev.total_cost_usd:
+                self._cost = ev.total_cost_usd
+            self.query_one("#header", Static).update(self._header_text())
+            self._render_status()
         elif isinstance(ev, E.Done):
             self._flush_prose(log, c)
             self._busy = False
             inp = self.query_one("#prompt", Input)
             inp.disabled = False
             inp.focus()
-            self._set_status({"complete": "ready", "stopped": "stopped",
-                              "max_steps": "hit step ceiling",
-                              "error": "error"}.get(ev.reason, "ready"))
+            self._phase = {"complete": "ready", "stopped": "stopped",
+                           "max_steps": "hit step ceiling",
+                           "error": "error"}.get(ev.reason, "ready")
+            self._render_status()
+
+    def _stream_prose(self, log: RichLog, c: dict, text: str) -> None:
+        """Accumulate the streaming reply and show a live preview of the latest
+        words in the status line, so the answer is visibly forming (never frozen).
+        The full reply is rendered as markdown when the turn finishes."""
+        self._prose += text
+        self._streamed = True
+        preview = harness.clean_reply(self._prose).replace("\n", " ")
+        preview = " ".join(preview.split())
+        if preview:
+            self._phase = "responding: …" + preview[-72:]
+        else:
+            self._phase = "responding…"
 
     def _flush_prose(self, log: RichLog, c: dict) -> None:
         prose = harness.clean_reply(self._prose)
@@ -521,11 +590,8 @@ class PriestApp(App):
         panel.update(out)
 
     def _set_status(self, text: str) -> None:
-        try:
-            self.query_one("#status", Static).update(
-                Text(text, style=self._col()["dim"]))
-        except Exception:
-            pass
+        self._phase = text
+        self._render_status()
 
     # ── actions ──────────────────────────────────────────────────────
     def action_toggle_todo(self) -> None:
