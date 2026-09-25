@@ -19,8 +19,35 @@ reasoning-effort dial. Everything else is just an id and a label.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+
+# DeepSeek's peak window (UTC): Mon–Fri 01:00–04:00 and 06:00–10:00. Everything
+# else — nights, and all weekend — is off-peak (the cheaper rate). The cost meter
+# uses the rate that actually applies right now, so it never over-charges at the
+# peak rate outside peak hours.
+_PEAK_WINDOWS = ((1.0, 4.0), (6.0, 10.0))
+
+
+def is_peak(now: Optional[datetime.datetime] = None) -> bool:
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.weekday() >= 5:            # Sat/Sun → off-peak
+        return False
+    h = now.hour + now.minute / 60.0
+    return any(a <= h < b for a, b in _PEAK_WINDOWS)
+
+
+def _parse_pair(s: str) -> Optional[Tuple[float, float]]:
+    s = (s or "").strip().lower()
+    if not s or s == "free":
+        return None
+    try:
+        a, _, b = s.partition("/")
+        return (float(a), float(b or a))
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -28,28 +55,34 @@ class Model:
     id: str
     label: str
     context: int                     # context window, thousands of tokens
-    price: str = ""                  # "in/out" USD per 1M tokens, or "free"/""
+    price: str = ""                  # "in/out" USD/1M — the standard (off-peak) rate
     thinking_off: bool = False       # send enable_thinking:false (DeepSeek)
     reasoning_effort: bool = False   # supports a low/high/max dial (GLM etc.)
     note: str = ""
+    price_peak: str = ""             # "in/out" USD/1M during peak hours, if different
 
-    def rates(self) -> Optional[Tuple[float, float]]:
-        """(input, output) USD per 1M tokens, or None when free/unknown — so the
-        cost meter shows real spend and nothing for free models."""
-        p = (self.price or "").strip().lower()
-        if not p or p == "free":
-            return None
-        try:
-            a, _, b = p.partition("/")
-            return (float(a), float(b or a))
-        except Exception:
-            return None
+    def rates(self, now: Optional[datetime.datetime] = None
+              ) -> Optional[Tuple[float, float]]:
+        """(input, output) USD per 1M tokens that apply RIGHT NOW — the peak rate
+        only during peak hours, the standard rate otherwise. None when free."""
+        if self.price_peak and is_peak(now):
+            r = _parse_pair(self.price_peak)
+            if r:
+                return r
+        return _parse_pair(self.price)
 
-    def cost_usd(self, prompt_tokens: int, completion_tokens: int) -> float:
-        r = self.rates()
+    def cost_usd(self, prompt_tokens: int, completion_tokens: int,
+                 now: Optional[datetime.datetime] = None) -> float:
+        r = self.rates(now)
         if not r:
             return 0.0
         return (prompt_tokens * r[0] + completion_tokens * r[1]) / 1_000_000.0
+
+    def price_display(self) -> str:
+        """Human price for listings: shows both rates when they differ."""
+        if self.price_peak and self.price_peak != self.price:
+            return f"{self.price} off-peak · {self.price_peak} peak"
+        return self.price
 
 
 @dataclass(frozen=True)
@@ -84,8 +117,9 @@ class Provider:
 _SF_MODELS = (
     # DeepSeek — the tuned home turf
     Model("deepseek-ai/DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash", 1049,
-          "0.30/1.20", thinking_off=True,
-          note="The tuned default. 1M context, trained for tools."),
+          "0.15/0.60", thinking_off=True, price_peak="0.30/1.20",
+          note="The tuned default. 1M context, trained for tools. "
+               "0.15/0.60 off-peak, 0.30/1.20 peak (UTC Mon-Fri 01-04 & 06-10)."),
     Model("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek-V4-Flash", 1049,
           "0.13/0.28", thinking_off=True,
           note="The cheaper benchmarked sibling."),
@@ -132,18 +166,23 @@ _SF_MODELS = (
 # The named entries below are current-as-of-catalog convenience picks; a stale
 # one degrades to a clean error, and `priest models --live` always lists the
 # real, current free set.
+# NOTE: OpenRouter's `:free` model ids ROTATE (a model that's free this week is
+# gone the next). These are ids confirmed live at build time; if one 404s, run
+# `priest models --live -P openrouter` for the current set and pick one, or use
+# the `openrouter/free` auto-router.
+_OR_NEX_PRO_FREE = Model(
+    "nex-agi/nex-n2.5-pro:free", "Nex N2.5 Pro (free)", 128, "free",
+    note="Free, capable general model. (Free ids rotate — see `models --live`.)")
+_OR_LING_FREE = Model(
+    "inclusionai/ling-3.0-flash-fin:free", "Ling 3.0 Flash (free)", 128, "free",
+    note="Free fast model.")
+_OR_NEX_MINI_FREE = Model(
+    "nex-agi/nex-n2.5-mini:free", "Nex N2.5 Mini (free)", 128, "free",
+    note="Free small/fast model.")
 _OR_AUTO_FREE = Model(
-    "openrouter/free", "Auto (free, tool-capable)", 128, "free",
-    note="OpenRouter picks a live FREE model that supports tools. Robust default.")
-_OR_GLM_FREE = Model(
-    "z-ai/glm-5.2:free", "GLM 5.2 (free)", 200, "free",
-    reasoning_effort=True, note="Free flagship-class GLM; strong agent model.")
-_OR_QWEN_FREE = Model(
-    "qwen/qwen3.8-27b:free", "Qwen3.8 27B (free)", 128, "free",
-    note="Free general/coding model.")
-_OR_NEMOTRON_FREE = Model(
-    "nvidia/nemotron-3-super-120b-a12b:free", "Nemotron 3 Super 120B (free)",
-    128, "free", note="Free large NVIDIA model.")
+    "openrouter/free", "Auto (free router)", 128, "free",
+    note="OpenRouter picks a live free model for you. Try this if a specific "
+         "free id has rotated out.")
 
 
 CATALOG: Dict[str, Provider] = {
@@ -157,8 +196,10 @@ CATALOG: Dict[str, Provider] = {
         "openrouter", "OpenRouter (free tier)",
         "https://openrouter.ai/api/v1",
         ("OPENROUTER_API_KEY", "PRIEST_API_KEY"),
-        (_OR_AUTO_FREE, _OR_GLM_FREE, _OR_QWEN_FREE, _OR_NEMOTRON_FREE),
-        signup="https://openrouter.ai/keys  (free key; free models cost $0)"),
+        (_OR_NEX_PRO_FREE, _OR_LING_FREE, _OR_NEX_MINI_FREE, _OR_AUTO_FREE),
+        signup="https://openrouter.ai/keys (free key). IMPORTANT for free models: "
+               "enable data sharing at openrouter.ai/settings/privacy, or they "
+               "return 'no endpoints'. Free ids rotate — `priest models --live`."),
     "zen": Provider(
         "zen", "OpenCode Zen (free, no sign-up)",
         "https://opencode.ai/zen/v1",

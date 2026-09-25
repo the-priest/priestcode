@@ -327,7 +327,7 @@ class PriestApp(App):
             for pid, prov in P.CATALOG.items():
                 line(f"{prov.label} [{pid}]", c["accent2"])
                 for m in prov.models:
-                    tag = f"  ({m.price})" if m.price else ""
+                    tag = f"  ({m.price_display()})" if m.price else ""
                     line(f"    {m.id}{tag}")
         elif cmd == "/model":
             if not arg:
@@ -368,7 +368,7 @@ class PriestApp(App):
                 label = Text()
                 label.append(f"{m.label}", style="bold")
                 if m.price:
-                    label.append(f"  {m.price}", style=self._col()["ok"]
+                    label.append(f"  {m.price_display()}", style=self._col()["ok"]
                                  if m.price == "free" else self._col()["dim"])
                 label.append(f"\n  {m.id}  ·  {prov.label}",
                              style=self._col()["dim"])

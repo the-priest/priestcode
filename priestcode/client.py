@@ -123,11 +123,16 @@ class Client:
             "max_tokens": max_tokens,
             "stream": True,
         }
-        # DeepSeek REQUIRES thinking off to use the function-call feature — and
-        # off is the right default for tool use across the family anyway.
-        if model.thinking_off:
+        # `enable_thinking` and `reasoning_effort` are SiliconFlow/DeepSeek-family
+        # extensions. Sending them to a provider that doesn't know them (OpenRouter,
+        # OpenCode Zen, most free endpoints) is a 400. So only send them to the
+        # provider they belong to; anywhere else the model just runs normally.
+        # (If some other provider does reject a field anyway, the retry below
+        # strips it rather than failing the turn.)
+        native_ext = getattr(self.provider, "id", "") == "siliconflow"
+        if model.thinking_off and native_ext:
             body["enable_thinking"] = False
-        if model.reasoning_effort:
+        if model.reasoning_effort and native_ext:
             body["reasoning_effort"] = reasoning_effort
         if tools:
             body["tools"] = tools
@@ -136,8 +141,12 @@ class Client:
         return self._attempt(body, on_token, on_reasoning, cancel,
                              native=bool(tools))
 
+    # optional params we can drop and retry when a provider rejects them
+    _STRIPPABLE = ("tools", "tool_choice", "enable_thinking", "reasoning_effort",
+                   "top_p", "temperature", "max_tokens")
+
     def _attempt(self, body, on_token, on_reasoning, cancel,
-                 native=False) -> Completion:
+                 native=False, _retry=0) -> Completion:
         url = self.base_url + "/chat/completions"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=self._headers(),
@@ -208,18 +217,33 @@ class Client:
                 detail = e.read().decode("utf-8", "replace")[:400]
             except Exception:
                 pass
-            # A provider that does not support the `tools` field: strip it and
-            # retry once on the text protocol rather than failing the turn.
+            # A provider rejected a parameter it doesn't support (common on free
+            # tiers): strip the offending field(s) and retry, rather than failing
+            # the whole turn. This is what makes the free tiers actually work —
+            # they reject `tools`, `enable_thinking`, etc., and we degrade instead
+            # of erroring.
             low = (detail or "").lower()
-            if (e.code in (400, 422) and native and body.get("tools")
-                    and any(w in low for w in
-                            ("tool", "function", "tool_choice"))):
-                body.pop("tools", None)
-                body.pop("tool_choice", None)
-                comp = self._attempt(body, on_token, on_reasoning, cancel,
-                                     native=False)
-                comp.tools_unsupported = True
-                return comp
+            if e.code in (400, 422) and _retry < 3:
+                present = [k for k in self._STRIPPABLE if k in body]
+                # 1) drop any field the error names explicitly
+                named = [k for k in present if k.replace("_", "") in
+                         low.replace("_", "") or k in low]
+                if "tool" in low or "function" in low:
+                    named += [k for k in ("tools", "tool_choice") if k in body]
+                # 2) if it named nothing useful, drop ALL the provider-specific
+                #    extensions at once (a lean retry that almost always works)
+                to_strip = list(dict.fromkeys(named)) or [
+                    k for k in ("tools", "tool_choice", "enable_thinking",
+                                "reasoning_effort") if k in body]
+                if to_strip:
+                    for k in to_strip:
+                        body.pop(k, None)
+                    still_native = native and "tools" in body
+                    comp = self._attempt(body, on_token, on_reasoning, cancel,
+                                         native=still_native, _retry=_retry + 1)
+                    if "tools" in to_strip:
+                        comp.tools_unsupported = True
+                    return comp
             comp.error = self._explain_http(e.code, detail)
             return comp
         except urllib.error.URLError as e:
@@ -256,17 +280,33 @@ class Client:
         comp.seconds = time.time() - started
         return comp
 
-    @staticmethod
-    def _explain_http(code: int, detail: str) -> str:
+    def _explain_http(self, code: int, detail: str) -> str:
+        pid = getattr(self.provider, "id", "")
+        low = (detail or "").lower()
+        keyless = bool(getattr(self.provider, "public_token", ""))
+        # OpenRouter free-tier's two classic failures, made actionable.
+        if pid == "openrouter" and (code == 404 or "no endpoints" in low
+                                    or "not a valid model" in low):
+            return ("OpenRouter couldn't serve that free model. Two usual causes: "
+                    "(1) the free model id rotated — run `priest models --live "
+                    "-P openrouter` and pick a current one, or use `openrouter/free`; "
+                    "(2) free models need data sharing enabled at "
+                    "openrouter.ai/settings/privacy.")
         if code in (401, 403):
-            return ("authentication failed — check your API key "
-                    "(`priest auth`).")
+            if keyless:
+                return (f"{self.provider.label} refused the free `public` token "
+                        "(it may now require a key). Run `priest auth` for this "
+                        "provider, or `priest models --live` to see what's served.")
+            return "authentication failed — check your API key (`priest auth`)."
         if code == 402:
             return "payment required — this model/provider needs credit."
+        if code == 404:
+            return ("model not found — the id may be wrong or (for free tiers) "
+                    "rotated out. Run `priest models --live` for the current set.")
         if code == 429:
-            return "rate limited — wait a moment and retry."
+            return ("rate limited — free tiers cap requests/day; wait a moment, "
+                    "retry, or switch model.")
         if 500 <= code < 600:
             return f"provider error (HTTP {code}) — usually transient, retry."
-        # surface a short reason for a 400/404 (bad model id, bad field)
         reason = detail.strip().replace("\n", " ")[:200] if detail else ""
         return f"HTTP {code}{': ' + reason if reason else ''}"

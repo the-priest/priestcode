@@ -178,7 +178,7 @@ def _subcommand(name: str, args) -> int:
             for m in prov.models:
                 tags = []
                 if m.price:
-                    tags.append(m.price)
+                    tags.append(m.price_display())
                 if m.thinking_off:
                     tags.append("tools-tuned")
                 if m.reasoning_effort:
