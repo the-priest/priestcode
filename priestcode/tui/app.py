@@ -447,6 +447,8 @@ class PriestApp(App):
         self.agent.client.provider = prov
         self.agent.config.provider = prov.id
         self.agent.config.model = m.id
+        # honour the new provider's tool-calling style (Gemini → text protocol)
+        self.agent.native = getattr(prov, "native_tools", True)
         # Switching to a DIFFERENT provider must also repoint the client's
         # endpoint and key, or the new model id gets sent to the old provider's
         # URL with the old key (auth/endpoint failure).

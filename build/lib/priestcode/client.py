@@ -252,9 +252,12 @@ class Client:
                         comp.tools_unsupported = True
                     return comp
             comp.error = self._explain_http(e.code, detail)
-            if e.code == 404 or any(w in low for w in
-                                    ("no endpoints", "not a valid model",
-                                     "model not found", "does not exist")):
+            # 404/"no endpoints" = rotated/typo'd id; 402 = this model wants
+            # payment. Both mean "switch to a live FREE model" for a free-tier
+            # user, so the agent's self-heal can recover either.
+            if e.code in (404, 402) or any(w in low for w in
+                                           ("no endpoints", "not a valid model",
+                                            "model not found", "does not exist")):
                 comp.model_missing = True
             return comp
         except urllib.error.URLError as e:
@@ -295,6 +298,16 @@ class Client:
         pid = getattr(self.provider, "id", "")
         low = (detail or "").lower()
         keyless = bool(getattr(self.provider, "public_token", ""))
+        # Zen's free tier is gated to the OpenCode app — be honest about it.
+        if "free tier" in low and "opencode" in low:
+            return ("OpenCode Zen's FREE tier only works inside the OpenCode app "
+                    "and can't be used from priestcode. Use a paid Zen key, or a "
+                    "free provider that works anywhere — Google Gemini (no credit "
+                    "card): get a key at aistudio.google.com/apikey, then `priest auth`.")
+        # Gemini/most providers 400 with 'missing authorization' when no key is set.
+        if "authorization" in low and ("missing" in low or "invalid" in low):
+            return (f"no API key set for {self.provider.label}. Run `priest auth` "
+                    f"and paste one — {self.provider.signup}")
         # OpenRouter free-tier's two classic failures, made actionable.
         if pid == "openrouter" and (code == 404 or "no endpoints" in low
                                     or "not a valid model" in low):

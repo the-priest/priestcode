@@ -95,8 +95,10 @@ class Provider:
     signup: str = ""                 # where to get a key
     needs_key: bool = True
     public_token: str = ""           # a fixed token used when no key is set
-    #                                  (OpenCode Zen serves free models on
-    #                                  `Bearer public` — zero sign-up)
+    native_tools: bool = True        # use OpenAI structured function-calling?
+    #   Gemini's OpenAI-compat layer requires a `thought_signature` echoed back in
+    #   functionCall parts (400 otherwise), which the plain OpenAI shape can't
+    #   carry — so Gemini uses the TEXT `<tool>` protocol instead (native=False).
 
     def model(self, model_id: str) -> Optional[Model]:
         for m in self.models:
@@ -223,7 +225,8 @@ CATALOG: Dict[str, Provider] = {
         ),
         signup="FREE, no credit card: get a key at aistudio.google.com/apikey "
                "(sign in with Google → Create API key), then run `priest auth`.",
-        needs_key=True),
+        needs_key=True,
+        native_tools=False),   # Gemini FC needs thought_signature → use text protocol
     # ── Groq — free and very fast (free key, no card) ──
     "groq": Provider(
         "groq", "Groq (FREE — fast, no card)",

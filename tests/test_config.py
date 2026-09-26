@@ -85,6 +85,10 @@ ck("gemini base is the OpenAI-compat endpoint",
    "generativelanguage.googleapis.com" in _gem.base_url and
    _gem.base_url.endswith("/openai"))
 ck("gemini requires a key (honest)", _gem.needs_key is True)
+ck("gemini uses the TEXT tool protocol (Gemini FC needs thought_signature)",
+   _gem.native_tools is False)
+ck("siliconflow keeps native function-calling",
+   P.get_provider("siliconflow").native_tools is True)
 _zen = P.get_provider("zen")
 ck("zen requires a key (its free tier is OpenCode-app-only)", _zen.needs_key is True)
 ck("zen sends no fake public token", not _zen.public_token)

@@ -56,8 +56,10 @@ class Agent:
         # Native (OpenCode-style) function-calling is the primary path: a real
         # `tools` schema goes out, structured tool_calls come back. Flips off for
         # the session if a provider rejects the tools field (then the text
-        # protocol fallback carries the turn).
-        self.native = True
+        # protocol fallback carries the turn). Some providers (Gemini) declare
+        # native_tools=False because their FC needs fields the OpenAI shape can't
+        # carry — they use the text `<tool>` protocol from the start.
+        self.native = getattr(provider, "native_tools", True)
         # the tool set is the agent/mode's (plan mode is read-only), plus any
         # explicit override, plus MCP tools merged in by the caller.
         self.tools = tools or self.agent_def.toolset()

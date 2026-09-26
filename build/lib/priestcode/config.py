@@ -23,6 +23,67 @@ def config_dir() -> Path:
     return Path(root) / "priestcode"
 
 
+# priestcode provider id → the candidate provider id(s) OpenCode uses in its
+# auth.json. Zen is provisioned automatically by OpenCode on first run (no manual
+# account), stored under the "opencode" provider — which is why it "just works"
+# there; we read that same credential.
+_OPENCODE_PROVIDER = {
+    "zen": ("opencode", "opencode-zen", "zen"),
+    "gemini": ("google", "gemini", "google-generative-ai"),
+    "groq": ("groq",),
+    "openrouter": ("openrouter",),
+    "siliconflow": ("siliconflow",),
+    "openai": ("openai",),
+}
+
+
+def _opencode_auth_paths():
+    paths = []
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        paths.append(Path(xdg) / "opencode" / "auth.json")
+    home = Path.home()
+    paths.append(home / ".local" / "share" / "opencode" / "auth.json")
+    paths.append(home / ".config" / "opencode" / "auth.json")
+    paths.append(home / "Library" / "Application Support" / "opencode"
+                 / "auth.json")   # macOS
+    return paths
+
+
+def _extract_token(entry) -> str:
+    if isinstance(entry, str) and entry.strip():
+        return entry.strip()
+    if isinstance(entry, dict):
+        for k in ("key", "apiKey", "api_key", "access", "accessToken",
+                  "access_token", "token"):
+            v = entry.get(k)
+            if v and isinstance(v, str):
+                return v.strip()
+    return ""
+
+
+def opencode_key(provider_id: str) -> str:
+    """Reuse a credential the user already has in OpenCode. Reads OpenCode's
+    auth.json and returns the api key (or oauth access token) for the mapped
+    provider — so Zen (which OpenCode auto-provisions) and any other provider set
+    up there work here with no re-auth. Best-effort; '' if nothing usable."""
+    candidates = _OPENCODE_PROVIDER.get(provider_id, ())
+    for p in _opencode_auth_paths():
+        try:
+            if not p.is_file():
+                continue
+            data = json.loads(p.read_text("utf-8"))
+            if not isinstance(data, dict):
+                continue
+            for oc in candidates:
+                tok = _extract_token(data.get(oc))
+                if tok:
+                    return tok
+        except Exception:
+            continue
+    return ""
+
+
 def config_path() -> Path:
     return config_dir() / "config.json"
 
@@ -83,8 +144,12 @@ class Config:
             v = os.environ.get(env)
             if v:
                 return v.strip()
-        # 3. a provider that serves free models on a fixed public token
-        #    (OpenCode Zen) — so free providers work with zero setup.
+        # 3. reuse a key the user already configured in OpenCode — so a provider
+        #    that works there (Zen, Gemini, Groq, …) works here too, no re-auth.
+        oc = opencode_key(self.provider)
+        if oc:
+            return oc
+        # 4. a provider that serves models on a fixed public token, if any
         if prov.public_token:
             return prov.public_token
         return ""

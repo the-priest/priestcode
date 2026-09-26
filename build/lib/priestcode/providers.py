@@ -95,8 +95,10 @@ class Provider:
     signup: str = ""                 # where to get a key
     needs_key: bool = True
     public_token: str = ""           # a fixed token used when no key is set
-    #                                  (OpenCode Zen serves free models on
-    #                                  `Bearer public` — zero sign-up)
+    native_tools: bool = True        # use OpenAI structured function-calling?
+    #   Gemini's OpenAI-compat layer requires a `thought_signature` echoed back in
+    #   functionCall parts (400 otherwise), which the plain OpenAI shape can't
+    #   carry — so Gemini uses the TEXT `<tool>` protocol instead (native=False).
 
     def model(self, model_id: str) -> Optional[Model]:
         for m in self.models:
@@ -200,29 +202,65 @@ CATALOG: Dict[str, Provider] = {
         signup="https://openrouter.ai/keys (free key). IMPORTANT for free models: "
                "enable data sharing at openrouter.ai/settings/privacy, or they "
                "return 'no endpoints'. Free ids rotate — `priest models --live`."),
+    # ── Google Gemini — the genuinely-free tier that WORKS (no credit card) ──
+    # OpenAI-compatible endpoint; a free key from Google AI Studio (a Google
+    # login, no card). This is the recommended free option.
+    "gemini": Provider(
+        "gemini", "Google Gemini (FREE — no credit card)",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        ("GEMINI_API_KEY", "GOOGLE_API_KEY", "PRIEST_API_KEY"),
+        (
+            # `*-latest` are stable ALIASES that always point at the current model
+            # — they never rotate out, so this default keeps working without edits.
+            Model("gemini-flash-latest", "Gemini Flash (latest, free)", 1000, "free",
+                  note="Free, no card. Always-current Flash. The default free pick."),
+            Model("gemini-flash-lite-latest", "Gemini Flash-Lite (latest, free)",
+                  1000, "free", note="Fastest, highest free limits."),
+            Model("gemini-3.8-flash", "Gemini 3.8 Flash (free)", 1000, "free",
+                  note="Google's current recommended Flash."),
+            Model("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite (free)", 1000,
+                  "free", note="Still available; fast and cheap."),
+            Model("gemini-pro-latest", "Gemini Pro (latest, free)", 1000, "free",
+                  note="Strongest; lower free rate limits."),
+        ),
+        signup="FREE, no credit card: get a key at aistudio.google.com/apikey "
+               "(sign in with Google → Create API key), then run `priest auth`.",
+        needs_key=True,
+        native_tools=False),   # Gemini FC needs thought_signature → use text protocol
+    # ── Groq — free and very fast (free key, no card) ──
+    "groq": Provider(
+        "groq", "Groq (FREE — fast, no card)",
+        "https://api.groq.com/openai/v1",
+        ("GROQ_API_KEY", "PRIEST_API_KEY"),
+        (
+            Model("llama-3.3-70b-versatile", "Llama 3.3 70B (free)", 128, "free",
+                  note="Free, fast, capable general model."),
+            Model("openai/gpt-oss-120b", "GPT-OSS 120B (free)", 128, "free",
+                  note="Large open model, free on Groq."),
+            Model("openai/gpt-oss-20b", "GPT-OSS 20B (free)", 128, "free",
+                  note="Smaller/faster, free on Groq."),
+        ),
+        signup="FREE, no credit card: get a key at console.groq.com/keys, "
+               "then `priest auth`.",
+        needs_key=True),
+    # ── OpenCode Zen — a Zen API KEY is required here. Zen's FREE tier is locked
+    #    to the OpenCode app itself ("FreeTierError: can only be used from within
+    #    OpenCode"), so no third-party client can use it for free. Paid models
+    #    work with a Zen key. For free, use Gemini/Groq/OpenRouter above. ──
     "zen": Provider(
-        "zen", "OpenCode Zen (free, no sign-up)",
+        "zen", "OpenCode Zen (paid key — free tier is OpenCode-only)",
         "https://opencode.ai/zen/v1",
         ("OPENCODE_API_KEY", "ZEN_API_KEY", "PRIEST_API_KEY"),
         (
-            Model("muse-spark-1.3-contributor-free", "Muse Spark 1.3 (free)",
-                  128, "free",
-                  note="Free on Zen, no sign-up. The default Zen pick."),
-            Model("deepseek-v4-flash-free", "DeepSeek-V4-Flash (free)", 1049,
-                  "free", thinking_off=True,
-                  note="Free on Zen — the exact family the harness is tuned for."),
-            Model("mimo-v2.5-free", "MiMo V2.5 (free)", 128, "free",
-                  note="Free coding model on Zen."),
-            Model("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (free)",
-                  128, "free", note="Free fast model on Zen."),
-            Model("big-pickle", "Big Pickle (free)", 128, "free",
-                  note="Free experimental model on Zen."),
+            Model("grok-code", "Grok Code", 256, "",
+                  note="Needs a Zen API key."),
+            Model("code-supernova", "Code Supernova", 256, "",
+                  note="Needs a Zen API key."),
         ),
-        signup="https://opencode.ai/zen  — free models need NO key (a fixed "
-               "`public` token is used). `priest models --live` lists the "
-               "current free set (they rotate).",
-        needs_key=False,
-        public_token="public"),
+        signup="Zen's FREE tier only works inside the OpenCode app — priestcode "
+               "can't use it. For paid Zen models add a key at opencode.ai/zen "
+               "then `priest auth`. For FREE, use Google Gemini (no card).",
+        needs_key=True),
     "openai": Provider(
         "openai", "OpenAI-compatible (custom)",
         "https://api.openai.com/v1",
@@ -256,9 +294,18 @@ def all_models() -> List[Tuple[str, Model]]:
     return out
 
 
+# model kinds that aren't chat (skip them in the free-chat picker)
+_NON_CHAT = ("tts", "image", "embedding", "embed", "lyria", "veo", "robotics",
+             "computer-use", "antigravity", "nano-banana", "transcribe", "aqa")
+
+
 def _row_is_free(provider_id: str, model_id: str, row: dict) -> bool:
-    """Best-effort 'is this live model free?' across providers."""
+    """Best-effort 'is this live model free (and chat-capable)?' per provider."""
     mid = model_id.lower()
+    # Gemini & Groq: their whole served catalog is usable on the free tier, so
+    # every chat model counts as free (there's no per-model 'free' flag to read).
+    if provider_id in ("gemini", "groq"):
+        return not any(x in mid for x in _NON_CHAT)
     if ":free" in mid or mid.endswith("-free") or "-free-" in mid:
         return True
     # OpenRouter (and many OpenAI-compat catalogs) expose per-token pricing.
@@ -298,7 +345,13 @@ def live_free_models(provider: "Provider", rows: List[dict]) -> List[Model]:
     seen = set()
     for r in rows:
         mid = r.get("id")
-        if not mid or mid in seen:
+        if not mid:
+            continue
+        # Gemini's /models lists ids as "models/gemini-…"; the chat endpoint wants
+        # the bare id. Normalise so the picker and requests use the same string.
+        if provider.id == "gemini" and mid.startswith("models/"):
+            mid = mid[len("models/"):]
+        if mid in seen:
             continue
         if _row_is_free(provider.id, mid, r):
             seen.add(mid)
