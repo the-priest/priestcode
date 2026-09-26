@@ -86,14 +86,13 @@ ck("gemini base is the OpenAI-compat endpoint",
    _gem.base_url.endswith("/openai"))
 ck("gemini requires a key (honest)", _gem.needs_key is True)
 _zen = P.get_provider("zen")
-ck("zen free tier needs NO key (open endpoint)", _zen.needs_key is False)
+ck("zen requires a key (its free tier is OpenCode-app-only)", _zen.needs_key is True)
 ck("zen sends no fake public token", not _zen.public_token)
+ck("zen signup is honest about the OpenCode-only free tier",
+   "opencode" in _zen.signup.lower() and "gemini" in _zen.signup.lower())
 _zcfg = C.Config(provider="zen", keys={})
-ck("zen with no key resolves to empty (→ no Authorization header sent)",
-   _zcfg.resolved_key() == "" and _zcfg.has_key())
-from priestcode.client import Client as _Cl  # noqa: E402
-ck("the Zen client sends NO Authorization header (the 401 bug is fixed)",
-   "Authorization" not in _Cl(_zen, _zen.base_url, _zcfg.resolved_key())._headers())
+ck("zen with no key has_key() is False (so it prompts for one, not a raw error)",
+   _zcfg.resolved_key() == "" and _zcfg.has_key() is False)
 
 print("\n== priestcode reuses a key already set up in OpenCode ==")
 _tmp = tempfile.mkdtemp()

@@ -298,6 +298,16 @@ class Client:
         pid = getattr(self.provider, "id", "")
         low = (detail or "").lower()
         keyless = bool(getattr(self.provider, "public_token", ""))
+        # Zen's free tier is gated to the OpenCode app — be honest about it.
+        if "free tier" in low and "opencode" in low:
+            return ("OpenCode Zen's FREE tier only works inside the OpenCode app "
+                    "and can't be used from priestcode. Use a paid Zen key, or a "
+                    "free provider that works anywhere — Google Gemini (no credit "
+                    "card): get a key at aistudio.google.com/apikey, then `priest auth`.")
+        # Gemini/most providers 400 with 'missing authorization' when no key is set.
+        if "authorization" in low and ("missing" in low or "invalid" in low):
+            return (f"no API key set for {self.provider.label}. Run `priest auth` "
+                    f"and paste one — {self.provider.signup}")
         # OpenRouter free-tier's two classic failures, made actionable.
         if pid == "openrouter" and (code == 404 or "no endpoints" in low
                                     or "not a valid model" in low):

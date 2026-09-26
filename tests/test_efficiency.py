@@ -84,6 +84,15 @@ zen_rows = [{"id": "muse-spark-9.9-contributor-free"}, {"id": "some-paid-model"}
 zfree = {m.id for m in P.live_free_models(P.get_provider("zen"), zen_rows)}
 ck("zen -free suffix detected", "muse-spark-9.9-contributor-free" in zfree)
 ck("zen non-free excluded", "some-paid-model" not in zfree)
+# Gemini: whole catalog is free-tier; ids are "models/…" and must be stripped,
+# and non-chat kinds (tts/image/embedding) filtered out.
+gem_rows = [{"id": "models/gemini-flash-latest"}, {"id": "models/gemini-3.8-flash"},
+            {"id": "models/gemini-2.5-flash-tts"}, {"id": "models/text-embedding-004"}]
+gfree = {m.id for m in P.live_free_models(P.get_provider("gemini"), gem_rows)}
+ck("gemini chat models detected as free with models/ stripped",
+   "gemini-flash-latest" in gfree and "gemini-3.8-flash" in gfree, str(gfree))
+ck("gemini non-chat (tts/embedding) excluded",
+   not any("tts" in i or "embedding" in i for i in gfree), str(gfree))
 
 print("\n== a rotated-out model heals itself from the live catalog ==")
 ws3 = Path(tempfile.mkdtemp())

@@ -127,9 +127,10 @@ is serving right now.
 - **OpenRouter** — a genuine free tier (`:free` models). Needs a free key AND
   data-sharing enabled at openrouter.ai/settings/privacy, or free models return
   "no endpoints". Free ids rotate — `priest models --live`.
-- **OpenCode Zen** — requires a Zen API key for every model (incl. free ones).
-  If you already use Zen in **OpenCode**, priestcode **reuses that key
-  automatically** (from OpenCode's `auth.json`) — no re-auth.
+- **OpenCode Zen** — its **free tier is locked to the OpenCode app** (the server
+  returns `FreeTierError: can only be used from within OpenCode`), so no
+  third-party client can use it for free. Paid Zen models work here with a Zen
+  API key. For free, use Gemini/Groq/OpenRouter above.
 
 > There is no truly keyless cloud LLM — "free" means the tokens cost $0, but a
 > (free) key is still needed. Gemini is the no-credit-card path. If a provider

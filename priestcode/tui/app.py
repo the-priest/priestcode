@@ -454,6 +454,13 @@ class PriestApp(App):
         self.agent.client.api_key = self.agent.config.resolved_key()
         self.query_one("#header", Static).update(self._header_text())
         log.write(Text(f"  model → {m.label}  [{prov.id}]", style=self._col()["ok"]))
+        # warn NOW if this provider has no key, instead of failing on the next send
+        try:
+            if prov.needs_key and not self.agent.config.has_key():
+                log.write(Text(f"  ⚠ no API key for {prov.label} — run `priest auth` "
+                               f"or set one. {prov.signup}", style=self._col()["warn"]))
+        except Exception:
+            pass
 
     def _set_approval(self, mode: str) -> None:
         self.agent.config.approval = mode
