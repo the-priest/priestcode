@@ -252,9 +252,12 @@ class Client:
                         comp.tools_unsupported = True
                     return comp
             comp.error = self._explain_http(e.code, detail)
-            if e.code == 404 or any(w in low for w in
-                                    ("no endpoints", "not a valid model",
-                                     "model not found", "does not exist")):
+            # 404/"no endpoints" = rotated/typo'd id; 402 = this model wants
+            # payment. Both mean "switch to a live FREE model" for a free-tier
+            # user, so the agent's self-heal can recover either.
+            if e.code in (404, 402) or any(w in low for w in
+                                           ("no endpoints", "not a valid model",
+                                            "model not found", "does not exist")):
                 comp.model_missing = True
             return comp
         except urllib.error.URLError as e:

@@ -236,23 +236,24 @@ CATALOG: Dict[str, Provider] = {
         signup="FREE, no credit card: get a key at console.groq.com/keys, "
                "then `priest auth`.",
         needs_key=True),
-    # ── OpenCode Zen — requires a Zen API KEY (and billing) for ALL models,
-    #    including the free ones. There is NO keyless/public access. ──
+    # ── OpenCode Zen — free models need NO key (the endpoint is open; sending a
+    #    bogus token is what gets rejected). Paid models need a Zen key. ──
     "zen": Provider(
-        "zen", "OpenCode Zen (key required)",
+        "zen", "OpenCode Zen (free — no key needed)",
         "https://opencode.ai/zen/v1",
         ("OPENCODE_API_KEY", "ZEN_API_KEY", "PRIEST_API_KEY"),
         (
-            Model("big-pickle", "Big Pickle (free-tier)", 128, "free",
-                  note="No token cost, but a Zen API key is still required."),
+            Model("big-pickle", "Big Pickle (free)", 128, "free",
+                  note="Free on Zen — no key. `priest models --live -P zen` "
+                       "lists the current free set (they rotate)."),
+            Model("grok-code", "Grok Code", 256, "",
+                  note="Coding model; may require a Zen key (paid)."),
             Model("code-supernova", "Code Supernova", 256, "",
-                  note="Coding model on Zen."),
-            Model("grok-code", "Grok Code", 256, "", note="Coding model on Zen."),
+                  note="Coding model; may require a Zen key (paid)."),
         ),
-        signup="Zen needs an API KEY for every model (incl. free ones): sign in "
-               "at opencode.ai/zen, add billing, copy the key, then `priest auth`. "
-               "For a no-card free option use Google Gemini instead.",
-        needs_key=True),
+        signup="Free models need NO key — just pick one. Paid models: add a Zen "
+               "key at opencode.ai/zen, then `priest auth`.",
+        needs_key=False),
     "openai": Provider(
         "openai", "OpenAI-compatible (custom)",
         "https://api.openai.com/v1",
